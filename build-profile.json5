@@ -1,0 +1,66 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "material": {
+          "storePassword": "00000020095386442363868CDB0A4F166F7BE150C557D48E918D3F5801EE6BD8A9D5B3D64AC9127120DE201883E1BFC7",
+          "certpath": "/storage/Users/currentUser/Documents/ohos/config/default_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "00000020095386442363868CDB0A4F166F7BE150C557D48E918D3F5801EE6BD8A9D5B3D64AC9127120DE201883E1BFC7",
+          "profile": "/storage/Users/currentUser/Documents/ohos/config/default_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/storage/Users/currentUser/Documents/ohos/config/default_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.p12"
+        },
+        "type": "HarmonyOS"
+      },
+      {
+        "name": "release",
+        "material": {
+          "storePassword": "000000200E03136F8611E901240461114682C45831E0535FF0F7B9304E1EFAA59C59A0ACDA80FA279CACE48DD76F373C",
+          "certpath": "/storage/Users/currentUser/Documents/ohos/config/release_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "000000200E03136F8611E901240461114682C45831E0535FF0F7B9304E1EFAA59C59A0ACDA80FA279CACE48DD76F373C",
+          "profile": "/storage/Users/currentUser/Documents/ohos/config/release_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/storage/Users/currentUser/Documents/ohos/config/release_LivelyNotepad1j7Tx6A2AlMnBcnVD8yGiGrCAAfKj4_JvgTA3Jvt5sw.p12"
+        },
+        "type": "HarmonyOS"
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "release",
+        "targetSdkVersion": "6.1.0(23)",
+        "compatibleSdkVersion": "5.0.0(12)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
