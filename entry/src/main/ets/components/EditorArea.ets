@@ -7,6 +7,9 @@ interface TokenRender {
   tokenType: TokenType;
   startIndex: number;
   endIndex: number;
+  bgColor: string;
+  decoration: TextDecorationType;
+  fontColor: string;
 }
 
 interface FoldLineIndicator {
@@ -160,6 +163,11 @@ export struct EditorAreaImpl {
   @State showMinimap: boolean = true;
   private minimapScroller: Scroller = new Scroller();
   private minimapScrollRatio: number = 0;
+  @State private minimapHeight: number = 0;
+  private minimapDragging: boolean = false;
+  private static readonly MINIMAP_LINE_H: number = 2;
+  private static readonly MINIMAP_WIDTH: number = 64;
+  private maxLineLen: number = 1;
 
   private onEditorScroll(_xOffset: number, yOffset: number): void {
     const totalH = this.getLines().length * this.lineH();
@@ -168,11 +176,18 @@ export struct EditorAreaImpl {
       this.minimapScrollRatio = Math.min(1, yOffset / Math.max(1, totalH - viewH));
     }
     this.lastScrollY = yOffset;
-    const minimapTotalH = this.getLines().length * 2;
-    if (minimapTotalH > 0) {
+    this.syncMinimapScroll();
+  }
+
+  private syncMinimapScroll(): void {
+    const lines = this.getLines();
+    const minimapTotalH = lines.length * EditorAreaImpl.MINIMAP_LINE_H;
+    const viewH = this.minimapHeight;
+    if (minimapTotalH > viewH && viewH > 0) {
+      const maxScroll = minimapTotalH - viewH;
       this.minimapScroller.scrollTo({
         xOffset: 0,
-        yOffset: this.minimapScrollRatio * minimapTotalH,
+        yOffset: this.minimapScrollRatio * maxScroll,
         animation: false
       });
     }
@@ -180,25 +195,47 @@ export struct EditorAreaImpl {
 
   private minimapSliderHeight(): number {
     const total = this.getLines().length;
-    if (total <= 1) return 100;
-    const ratio = Math.min(1, this.visibleLineCount / total);
-    return Math.max(6, ratio * 100);
+    if (total <= 1 || this.minimapHeight <= 0) return 20;
+    const minimapTotalH = total * EditorAreaImpl.MINIMAP_LINE_H;
+    const ratio = Math.min(1, this.minimapHeight / Math.max(1, minimapTotalH));
+    return Math.max(8, ratio * this.minimapHeight);
   }
 
   private minimapSliderOffset(): number {
-    const total = this.getLines().length;
-    if (total <= 1) return 0;
     const sliderH = this.minimapSliderHeight();
-    return this.minimapScrollRatio * (100 - sliderH);
+    const maxOffset = this.minimapHeight - sliderH;
+    if (maxOffset <= 0) return 0;
+    return this.minimapScrollRatio * maxOffset;
+  }
+
+  private computeMaxLineLen(): void {
+    const lines = this.getLines();
+    let maxLen = 1;
+    for (let i = 0; i < lines.length; i++) {
+      const len = lines[i].length;
+      if (len > maxLen) maxLen = len;
+    }
+    this.maxLineLen = maxLen;
   }
 
   private minimapLineWidth(line: string): number {
-    const visible = line.trimStart();
-    return Math.max(visible.length, 1) * 0.8;
+    const visibleLen = line.replace(/\t/g, '    ').length;
+    const mw = EditorAreaImpl.MINIMAP_WIDTH - 4;
+    const scale = Math.min(1, mw / Math.max(1, this.maxLineLen));
+    return Math.max(2, visibleLen * scale);
   }
 
   private minimapLineIndent(line: string): number {
-    return this.getLineIndent(line) * 0.5;
+    let indent = 0;
+    for (let i = 0; i < line.length; i++) {
+      const c = line.charAt(i);
+      if (c === ' ') indent++;
+      else if (c === '\t') indent += 4;
+      else break;
+    }
+    const mw = EditorAreaImpl.MINIMAP_WIDTH - 4;
+    const scale = Math.min(1, mw / Math.max(1, this.maxLineLen));
+    return Math.min(indent * scale, mw * 0.4);
   }
 
   private minimapLineColor(lineIdx: number): string {
@@ -218,7 +255,48 @@ export struct EditorAreaImpl {
     if (trimmed.includes('"') || trimmed.includes("'")) {
       return this.currentColorMode === 'light' ? '#067D17' : '#6A8759';
     }
+    const kw = this.getLeadingWs(line).length < line.length
+      ? line.trimStart().split(/[\s(]/)[0] : '';
+    if (kw.length > 0) {
+      const kwSet = new Set([
+        'int', 'void', 'class', 'struct', 'if', 'else', 'for', 'while',
+        'return', 'const', 'static', 'def', 'function', 'import', 'from',
+        'public', 'private', 'protected', 'try', 'catch', 'throw',
+        'new', 'this', 'super', 'enum', 'switch', 'case', 'break',
+        'continue', 'do', 'goto', 'using', 'namespace', 'template',
+        'let', 'var', 'async', 'await', 'export', 'default', 'extends',
+        'implements', 'interface', 'type', 'readonly', 'abstract'
+      ]);
+      if (kwSet.has(kw)) {
+        return this.currentColorMode === 'light' ? '#0033B3' : '#CC7832';
+      }
+    }
     return this.col().textSecondary;
+  }
+
+  private onMinimapClick(yRatio: number): void {
+    const totalH = this.getLines().length * this.lineH();
+    const viewH = this.visibleLineCount * this.lineH();
+    const targetY = yRatio * totalH - viewH * 0.5;
+    this.editorScroller.scrollTo({
+      xOffset: 0,
+      yOffset: Math.max(0, Math.min(targetY, totalH - viewH)),
+      animation: { duration: 100, curve: Curve.Linear }
+    });
+  }
+
+  private onMinimapDrag(yOffset: number): void {
+    const totalH = this.getLines().length * this.lineH();
+    const viewH = this.visibleLineCount * this.lineH();
+    const maxEditorScroll = Math.max(1, totalH - viewH);
+    const deltaRatio = yOffset / Math.max(1, this.minimapHeight);
+    this.minimapScrollRatio = Math.max(0, Math.min(1, this.minimapScrollRatio + deltaRatio));
+    this.editorScroller.scrollTo({
+      xOffset: 0,
+      yOffset: this.minimapScrollRatio * maxEditorScroll,
+      animation: false
+    });
+    this.lastScrollY = this.minimapScrollRatio * maxEditorScroll;
   }
 
   @State showCommandPalette: boolean = false;
@@ -403,6 +481,8 @@ export struct EditorAreaImpl {
     const newText = before + expansion + after;
     this.editorText = newText;
     this.fullText = newText;
+    this.displayText = newText;
+    this.lastHandledText = newText;
     // 光标放到展开后的第一行缩进位置
     const firstTab = expansion.indexOf('\t');
     const cursorPos = start + (firstTab >= 0 ? firstTab + 1 : expansion.length);
@@ -455,6 +535,8 @@ export struct EditorAreaImpl {
     const newText = before + s + after;
     this.editorText = newText;
     this.fullText = newText;
+    this.displayText = newText;
+    this.lastHandledText = newText;
     this.trackedCursor = pos + s.length;
     this.invalidateLines();
     this.updateTokens();
@@ -894,6 +976,8 @@ export struct EditorAreaImpl {
     const t = text.substring(0, cursor) + insert + text.substring(cursor);
     this.editorText = t;
     this.fullText = t;
+    this.displayText = t;
+    this.lastHandledText = t;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -913,6 +997,8 @@ export struct EditorAreaImpl {
     const t = lines.join('\n');
     this.editorText = t;
     this.fullText = t;
+    this.displayText = t;
+    this.lastHandledText = t;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -931,6 +1017,8 @@ export struct EditorAreaImpl {
     const t = text.substring(0, insPos) + '\n' + indent + text.substring(insPos);
     this.editorText = t;
     this.fullText = t;
+    this.displayText = t;
+    this.lastHandledText = t;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -948,6 +1036,8 @@ export struct EditorAreaImpl {
     const t = text.substring(0, insPos) + indent + '\n' + text.substring(insPos);
     this.editorText = t;
     this.fullText = t;
+    this.displayText = t;
+    this.lastHandledText = t;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -1283,11 +1373,16 @@ export struct EditorAreaImpl {
     }
     const newText = newLines.join('\n');
     if (newText !== this.editorText) {
+      const cursor = this.trackedCursor;
       this.editorText = newText;
       this.fullText = newText;
+      this.displayText = newText;
+      this.lastHandledText = newText;
       this.invalidateLines();
       this.updateTokens();
       this.buildLineList();
+      this.syncStats();
+      setTimeout(() => { this.textAreaController.caretPosition(cursor); }, 0);
     }
   }
 
@@ -1307,6 +1402,11 @@ export struct EditorAreaImpl {
     this.textChanging = true;
     let cleanValue = this.replaceCrlf(value);
     if (cleanValue === this.lastHandledText) {
+      this.textChanging = false;
+      return;
+    }
+    if (cleanValue === this.editorText) {
+      this.lastHandledText = cleanValue;
       this.textChanging = false;
       return;
     }
@@ -1609,7 +1709,10 @@ export struct EditorAreaImpl {
               text: parts[i],
               tokenType: tok.tokenType,
               startIndex: tok.startIndex,
-              endIndex: tok.startIndex + parts[i].length
+              endIndex: tok.startIndex + parts[i].length,
+              bgColor: tok.bgColor,
+              decoration: tok.decoration,
+              fontColor: tok.fontColor
             });
           }
           if (i < parts.length - 1) {
@@ -1628,20 +1731,17 @@ export struct EditorAreaImpl {
   }
 
   private buildRenderTokens(): void {
-    const result: TokenRender[] = [];
+    const raw: TokenRender[] = [];
     let pos = 0;
     const cr: number[][] = [];
     const lines = this.getLines();
 
-    // 计算每行的起始字符偏移
     const ls: number[] = [0];
     for (let i = 0; i < lines.length; i++) {
       if (i > 0) {
         ls.push(ls[i - 1] + lines[i - 1].length + 1);
       }
     }
-    // 收集折叠区域的范围（字符偏移）
-    // 折叠范围：从 opening line 末尾到 closing line 开头，保留 closing line（}）可见
     for (const r of this.foldRegions) {
       if (r.collapsed &&
           r.endLine > r.startLine &&
@@ -1649,11 +1749,10 @@ export struct EditorAreaImpl {
           r.endLine < lines.length) {
         cr.push([
           ls[r.startLine] + lines[r.startLine].length + 1,
-          ls[r.endLine]  // closing line 及其 `}` 保持可见
+          ls[r.endLine]
         ]);
       }
     }
-    // 过滤 Token：跳过折叠区域内的 Token
     for (const tok of this.tokens) {
       if (tok.text.length === 0) { pos += tok.text.length; continue; }
       let skip = false;
@@ -1664,16 +1763,49 @@ export struct EditorAreaImpl {
         }
       }
       if (!skip) {
-        result.push({
+        const si = pos;
+        raw.push({
           text: tok.text,
           tokenType: tok.type,
-          startIndex: pos,
-          endIndex: pos + tok.text.length
+          startIndex: si,
+          endIndex: si + tok.text.length,
+          bgColor: this.mergeBg(si),
+          decoration: this.matchDecoration(si),
+          fontColor: this.spanColor(tok.type, si)
         });
       }
       pos += tok.text.length;
     }
-    this.renderTokens = result;
+    this.renderTokens = this.mergeTokens(raw);
+  }
+
+  private mergeTokens(tokens: TokenRender[]): TokenRender[] {
+    if (tokens.length <= 1) return tokens;
+    const result: TokenRender[] = [];
+    let cur = tokens[0];
+    for (let i = 1; i < tokens.length; i++) {
+      const next = tokens[i];
+      if (cur.tokenType === next.tokenType &&
+          cur.bgColor === next.bgColor &&
+          cur.decoration === next.decoration &&
+          cur.fontColor === next.fontColor &&
+          cur.endIndex === next.startIndex) {
+        cur = {
+          text: cur.text + next.text,
+          tokenType: cur.tokenType,
+          startIndex: cur.startIndex,
+          endIndex: next.endIndex,
+          bgColor: cur.bgColor,
+          decoration: cur.decoration,
+          fontColor: cur.fontColor
+        };
+      } else {
+        result.push(cur);
+        cur = next;
+      }
+    }
+    result.push(cur);
+    return result;
   }
 
   /**
@@ -1683,6 +1815,7 @@ export struct EditorAreaImpl {
     const lines = this.getLines();
     this.findAllFoldRegions();
     this.computeWrappedLines();
+    this.computeMaxLineLen();
 
     if (this.foldAll || this.storeFoldAll) {
       for (const r of this.foldRegions) {
@@ -1973,6 +2106,8 @@ export struct EditorAreaImpl {
     const result = lines.join('\n');
     this.editorText = result;
     this.fullText = result;
+    this.displayText = result;
+    this.lastHandledText = result;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -2004,6 +2139,8 @@ export struct EditorAreaImpl {
     const result = lines.join('\n');
     this.editorText = result;
     this.fullText = result;
+    this.displayText = result;
+    this.lastHandledText = result;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -2030,6 +2167,8 @@ export struct EditorAreaImpl {
     const result = lines.join('\n');
     this.editorText = result;
     this.fullText = result;
+    this.displayText = result;
+    this.lastHandledText = result;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -2049,6 +2188,8 @@ export struct EditorAreaImpl {
     const t = text.substring(0, start) + transformed + text.substring(end);
     this.editorText = t;
     this.fullText = t;
+    this.displayText = t;
+    this.lastHandledText = t;
     this.invalidateLines();
     this.updateTokens();
     this.buildLineList();
@@ -2253,11 +2394,15 @@ export struct EditorAreaImpl {
     this.updateTokens();
     this.buildLineList();
     this.syncStats();
+    this.lastScrollY = 0;
+    this.minimapScrollRatio = 0;
+    this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
     setTimeout(() => {
       this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
       this.lastScrollY = 0;
       this.minimapScrollRatio = 0;
-    }, 50);
+      this.syncMinimapScroll();
+    }, 80);
   }
   syncFromExternal(): void {
     const clean = this.replaceCrlf(this.content);
@@ -2278,12 +2423,14 @@ export struct EditorAreaImpl {
       setTimeout(() => {
         this.editorScroller.scrollTo({ xOffset: 0, yOffset: savedScrollY, animation: false });
         this.lastScrollY = savedScrollY;
+        this.syncMinimapScroll();
       }, 50);
     } else {
       this.lastScrollY = 0;
       this.minimapScrollRatio = 0;
       setTimeout(() => {
         this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+        this.syncMinimapScroll();
       }, 50);
     }
   }
@@ -2464,9 +2611,9 @@ export struct EditorAreaImpl {
               Text() {
                 ForEach(this.renderTokens, (tok: TokenRender, i: number) => {
                   Span(tok.text)
-                    .fontColor(this.spanColor(tok.tokenType, tok.startIndex))
-                    .backgroundColor(this.mergeBg(tok.startIndex))
-                    .decoration({ type: this.matchDecoration(tok.startIndex),
+                    .fontColor(tok.fontColor)
+                    .backgroundColor(tok.bgColor)
+                    .decoration({ type: tok.decoration,
                                    color: this.col().searchMark })
                 }, (tok: TokenRender, i: number) => tok.startIndex.toString() + ':' + tok.endIndex.toString() + ':' + tok.text.length.toString())
               }
@@ -2514,7 +2661,7 @@ export struct EditorAreaImpl {
               }
             }
           })
-        }.alignItems(VerticalAlign.Top)
+        }.alignItems(VerticalAlign.Top).width('100%')
     }.scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring)
       .onScroll((xOffset: number, yOffset: number) => { this.onEditorScroll(xOffset, yOffset); })
       .align(Alignment.TopStart).backgroundColor(this.col().bg).layoutWeight(1)
@@ -2526,14 +2673,14 @@ export struct EditorAreaImpl {
           Column() {
             ForEach(this.getLines(), (line: string, idx: number) => {
               Row()
-                .width(Math.min(56, Math.max(4, this.minimapLineWidth(line))))
-                .height(2)
+                .width(Math.min(EditorAreaImpl.MINIMAP_WIDTH - 4, Math.max(2, this.minimapLineWidth(line))))
+                .height(EditorAreaImpl.MINIMAP_LINE_H)
                 .backgroundColor(this.minimapLineColor(idx))
-                .opacity(0.5)
-                .margin({ left: this.minimapLineIndent(line) })
+                .opacity(0.55)
+                .margin({ left: this.minimapLineIndent(line) + 2 })
             }, (line: string, idx: number) => idx.toString())
           }
-          .width(60)
+          .width(EditorAreaImpl.MINIMAP_WIDTH)
         }
         .scrollBar(BarState.Off)
         .hitTestBehavior(HitTestMode.None)
@@ -2541,25 +2688,38 @@ export struct EditorAreaImpl {
         .align(Alignment.TopStart)
 
         Row()
-          .width(60)
+          .width(EditorAreaImpl.MINIMAP_WIDTH)
           .height(this.minimapSliderHeight())
           .backgroundColor(this.col().accent)
-          .opacity(0.2)
+          .opacity(0.15)
           .offset({ y: this.minimapSliderOffset() })
-          .hitTestBehavior(HitTestMode.None)
+          .hitTestBehavior(HitTestMode.Transparent)
       }
-      .width(60)
+      .width(EditorAreaImpl.MINIMAP_WIDTH)
       .height('100%')
       .clip(true)
       .border({ width: { left: 1 }, color: this.col().border })
       .onClick((event: ClickEvent) => {
-        const h = Number(event.target.area.height);
+        const h = this.minimapHeight;
         if (h > 0) {
-          const ratio = event.y / h;
-          const totalH = this.getLines().length * this.lineH();
-          this.editorScroller.scrollTo({ xOffset: 0, yOffset: ratio * totalH, animation: false });
+          this.onMinimapClick(event.y / h);
         }
       })
+      .onAreaChange((_oldArea: Area, newArea: Area) => {
+        const h = Number(newArea.height);
+        if (h !== this.minimapHeight) {
+          this.minimapHeight = h;
+          this.syncMinimapScroll();
+        }
+      })
+      .gesture(
+        PanGesture({ fingers: 1, direction: PanDirection.Vertical })
+          .onActionStart(() => { this.minimapDragging = true; })
+          .onActionUpdate((event: GestureEvent) => {
+            this.onMinimapDrag(event.offsetY * 0.05);
+          })
+          .onActionEnd(() => { this.minimapDragging = false; })
+      )
     }
     }.width('100%').height('100%')
 
