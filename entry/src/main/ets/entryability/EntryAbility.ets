@@ -6,7 +6,6 @@ export default class EntryAbility extends UIAbility {
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
-      // Ignore
     }
   }
 
@@ -17,6 +16,15 @@ export default class EntryAbility extends UIAbility {
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         return;
+      }
+      const mainWindow = windowStage.getMainWindowSync();
+      if (mainWindow) {
+        mainWindow.setWindowSystemBarProperties({
+          statusBarColor: '#00000000',
+          navigationBarColor: '#00000000',
+          isNavigationBarLightIcon: false,
+          isStatusBarLightIcon: true
+        });
       }
     });
   }

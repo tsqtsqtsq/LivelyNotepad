@@ -77,8 +77,8 @@ export struct EditorAreaImpl {
   @Prop @Watch('onFoldAllChange') foldAll: boolean = false;
   @StorageProp('foldAll') storeFoldAll: boolean = false;
   @Prop isModified: boolean = false;
+  @Prop @Watch('onTabSwitch') tabId: string = '';
   @Prop readOnly: boolean = false;
-  @Prop tabId: string = '';
   onContentChange?: (text: string) => void;
   onCursorMove?: (line: number, column: number) => void;
   onLanguageDetect?: (lang: string) => void;
@@ -155,7 +155,7 @@ export struct EditorAreaImpl {
 
   private fullText: string = '';
   private activeFoldCount: number = 0;
-  private visibleLineCount: number = 1;
+  @State visibleLineCount: number = 1;
   private lastScrollY: number = 0;
   private editorScroller: Scroller = new Scroller();
   private foldRegions: FoldRegion[] = [];
@@ -168,6 +168,7 @@ export struct EditorAreaImpl {
   private static readonly MINIMAP_LINE_H: number = 2;
   private static readonly MINIMAP_WIDTH: number = 64;
   private maxLineLen: number = 1;
+  @State wrapRefreshKey: number = 0;
 
   private onEditorScroll(_xOffset: number, yOffset: number): void {
     const totalH = this.getLines().length * this.lineH();
@@ -208,6 +209,13 @@ export struct EditorAreaImpl {
     return this.minimapScrollRatio * maxOffset;
   }
 
+  private minimapContainerHeight(): number {
+    const totalLines = this.getLines().length;
+    const naturalH = totalLines * EditorAreaImpl.MINIMAP_LINE_H;
+    if (this.minimapHeight <= 0) return naturalH;
+    return Math.min(naturalH, this.minimapHeight);
+  }
+
   private computeMaxLineLen(): void {
     const lines = this.getLines();
     let maxLen = 1;
@@ -238,6 +246,16 @@ export struct EditorAreaImpl {
     return Math.min(indent * scale, mw * 0.4);
   }
 
+  private static readonly MINIMAP_KW: Set<string> = new Set([
+    'int', 'void', 'class', 'struct', 'if', 'else', 'for', 'while',
+    'return', 'const', 'static', 'def', 'function', 'import', 'from',
+    'public', 'private', 'protected', 'try', 'catch', 'throw',
+    'new', 'this', 'super', 'enum', 'switch', 'case', 'break',
+    'continue', 'do', 'goto', 'using', 'namespace', 'template',
+    'let', 'var', 'async', 'await', 'export', 'default', 'extends',
+    'implements', 'interface', 'type', 'readonly', 'abstract'
+  ]);
+
   private minimapLineColor(lineIdx: number): string {
     if (lineIdx === this.currentLineNum) {
       return this.col().accent;
@@ -258,16 +276,7 @@ export struct EditorAreaImpl {
     const kw = this.getLeadingWs(line).length < line.length
       ? line.trimStart().split(/[\s(]/)[0] : '';
     if (kw.length > 0) {
-      const kwSet = new Set([
-        'int', 'void', 'class', 'struct', 'if', 'else', 'for', 'while',
-        'return', 'const', 'static', 'def', 'function', 'import', 'from',
-        'public', 'private', 'protected', 'try', 'catch', 'throw',
-        'new', 'this', 'super', 'enum', 'switch', 'case', 'break',
-        'continue', 'do', 'goto', 'using', 'namespace', 'template',
-        'let', 'var', 'async', 'await', 'export', 'default', 'extends',
-        'implements', 'interface', 'type', 'readonly', 'abstract'
-      ]);
-      if (kwSet.has(kw)) {
+      if (EditorAreaImpl.MINIMAP_KW.has(kw)) {
         return this.currentColorMode === 'light' ? '#0033B3' : '#CC7832';
       }
     }
@@ -488,8 +497,7 @@ export struct EditorAreaImpl {
     const cursorPos = start + (firstTab >= 0 ? firstTab + 1 : expansion.length);
     this.trackedCursor = cursorPos;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     this.textAreaController.caretPosition(cursorPos);
     return true;
   }
@@ -539,8 +547,7 @@ export struct EditorAreaImpl {
     this.lastHandledText = newText;
     this.trackedCursor = pos + s.length;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     this.textAreaController.caretPosition(this.trackedCursor);
   }
   /**
@@ -717,7 +724,7 @@ export struct EditorAreaImpl {
     return i;
   }
 
-  private currentLineStart: number = 0;
+  private currentLineStart: number = -1;
   private currentLineEnd: number = 0;
   private trackedCursor: number = 0;
 
@@ -979,8 +986,7 @@ export struct EditorAreaImpl {
     this.displayText = t;
     this.lastHandledText = t;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(t);
     setTimeout(() => { this.textAreaController.caretPosition(cursor + insert.length); }, 0);
   }
@@ -1000,8 +1006,7 @@ export struct EditorAreaImpl {
     this.displayText = t;
     this.lastHandledText = t;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(t);
     setTimeout(() => { this.textAreaController.caretPosition(Math.max(0, cursor - remove)); }, 0);
   }
@@ -1020,8 +1025,7 @@ export struct EditorAreaImpl {
     this.displayText = t;
     this.lastHandledText = t;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(t);
     setTimeout(() => { this.textAreaController.caretPosition(insPos + 1 + indent.length); }, 0);
   }
@@ -1039,8 +1043,7 @@ export struct EditorAreaImpl {
     this.displayText = t;
     this.lastHandledText = t;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(t);
     setTimeout(() => { this.textAreaController.caretPosition(insPos + indent.length); }, 0);
   }
@@ -1379,8 +1382,7 @@ export struct EditorAreaImpl {
       this.displayText = newText;
       this.lastHandledText = newText;
       this.invalidateLines();
-      this.updateTokens();
-      this.buildLineList();
+      this.beginRefresh();
       this.syncStats();
       setTimeout(() => { this.textAreaController.caretPosition(cursor); }, 0);
     }
@@ -1400,158 +1402,166 @@ export struct EditorAreaImpl {
       return;
     }
     this.textChanging = true;
-    let cleanValue = this.replaceCrlf(value);
-    if (cleanValue === this.lastHandledText) {
-      this.textChanging = false;
-      return;
-    }
-    if (cleanValue === this.editorText) {
-      this.lastHandledText = cleanValue;
-      this.textChanging = false;
-      return;
-    }
-    const oldText = this.lastHandledText;
-    if (cleanValue === oldText) {
-      this.textChanging = false;
-      return;
-    }
-    this.autoIndentCaret = -1;
-
-    if (cleanValue.length < oldText.length) {
-      const wrapped = this.tryWrapSelection(oldText, cleanValue);
-      if (wrapped !== null) {
-        cleanValue = wrapped;
-      }
-    }
-
-    this.updateSelectionStats(oldText, cleanValue);
-
-    if (cleanValue.length > oldText.length) {
-      cleanValue = this.fixCloseDuplicates(cleanValue, oldText);
-      if (cleanValue === oldText) {
-        this.lastHandledText = cleanValue;
-        this.textChanging = false;
+    try {
+      let cleanValue = this.replaceCrlf(value);
+      if (cleanValue === this.lastHandledText) {
         return;
       }
-      cleanValue = this.tryAutoClose(oldText, cleanValue);
-      cleanValue = this.tryAutoIndent(oldText, cleanValue);
-      cleanValue = this.tryBraceIndent(oldText, cleanValue);
+      if (cleanValue === this.editorText) {
+        this.lastHandledText = cleanValue;
+        return;
+      }
+      const oldText = this.lastHandledText;
+      if (cleanValue === oldText) {
+        return;
+      }
+      this.autoIndentCaret = -1;
 
-      const cursorExplicit = this.autoIndentCaret >= 0;
-      let changedPos: number;
-      if (cursorExplicit) {
-        changedPos = this.autoIndentCaret;
-        this.autoIndentCaret = -1;
-      } else {
-        changedPos = 0;
-        const ol = oldText.length;
-        while (changedPos < cleanValue.length &&
-               changedPos < ol &&
-               cleanValue.charAt(changedPos) ===
-               oldText.charAt(changedPos)) {
-          changedPos++;
+      if (cleanValue.length < oldText.length) {
+        const wrapped = this.tryWrapSelection(oldText, cleanValue);
+        if (wrapped !== null) {
+          cleanValue = wrapped;
         }
       }
-      this.trackedCursor = changedPos;
 
-      this.currentLineNum = this.lineFromPosFast(changedPos);
-      this.updateBracketMatching(cleanValue, changedPos);
-      this.updateWordHighlight();
+      this.updateSelectionStats(oldText, cleanValue);
 
-      if (this.activeFoldCount === 0) {
+      if (cleanValue.length > oldText.length) {
+        cleanValue = this.fixCloseDuplicates(cleanValue, oldText);
+        if (cleanValue === oldText) {
+          this.lastHandledText = cleanValue;
+          return;
+        }
+        cleanValue = this.tryAutoClose(oldText, cleanValue);
+        cleanValue = this.tryAutoIndent(oldText, cleanValue);
+        cleanValue = this.tryBraceIndent(oldText, cleanValue);
+
+        const cursorExplicit = this.autoIndentCaret >= 0;
+        let changedPos: number;
+        if (cursorExplicit) {
+          changedPos = this.autoIndentCaret;
+          this.autoIndentCaret = -1;
+        } else {
+          changedPos = 0;
+          const ol = oldText.length;
+          while (changedPos < cleanValue.length &&
+                 changedPos < ol &&
+                 cleanValue.charAt(changedPos) ===
+                 oldText.charAt(changedPos)) {
+            changedPos++;
+          }
+        }
+        this.trackedCursor = changedPos;
+
+        this.currentLineNum = this.lineFromPosFast(changedPos);
+        this.updateBracketMatching(cleanValue, changedPos);
+        this.updateWordHighlight();
+
+        if (this.activeFoldCount === 0) {
+          this.editorText = cleanValue;
+          this.fullText = cleanValue;
+          this.syncStats();
+        } else {
+          this.applyVisibleChange(cleanValue);
+        }
+        if (cursorExplicit) {
+          this.textAreaController.caretPosition(changedPos);
+          setTimeout(() => {
+            this.textAreaController.caretPosition(changedPos);
+          }, 20);
+        }
+        this.displayText = this.editorText;
+        this.invalidateLines();
+
+        if (this.lineOffsetDirty) this.buildLineOffsetCache();
+        const clp = this.currentLineNum < this.lineOffsetCache.length
+          ? this.lineOffsetCache[this.currentLineNum] : 0;
+        this.currentLineStart = clp;
+        this.currentLineEnd = clp +
+          (this.currentLineNum < this.cachedLines.length
+            ? this.cachedLines[this.currentLineNum].length : 0);
+
+        if (this.language === 'plaintext' && cleanValue.length > 8) {
+          const d = this.detectLanguage();
+          if (d !== 'plaintext' && this.onLanguageDetect) {
+            this.onLanguageDetect(d);
+          }
+        }
+
+        this.beginRefresh();
+        this.scrollToCurrentLine();
+        if (this.onCursorMove) {
+          const ln = this.currentLineNum + 1;
+          let col = 1;
+          for (let j = changedPos - 1; j >= 0; j--) {
+            if (cleanValue.charAt(j) === '\n') {
+              break;
+            }
+            col++;
+          }
+          this.onCursorMove(ln, col);
+        }
+      } else {
+        cleanValue = this.trySelectionWrap(oldText, cleanValue);
+        cleanValue = this.trySmartBackspace(oldText, cleanValue);
+
+        const cursorExplicit = this.autoIndentCaret >= 0;
+        let changedPos: number;
+        if (cursorExplicit) {
+          changedPos = this.autoIndentCaret;
+          this.autoIndentCaret = -1;
+        } else {
+          changedPos = 0;
+          while (changedPos < cleanValue.length &&
+                 changedPos < oldText.length &&
+                 cleanValue.charAt(changedPos) ===
+                 oldText.charAt(changedPos)) {
+            changedPos++;
+          }
+        }
+
         this.editorText = cleanValue;
         this.fullText = cleanValue;
         this.syncStats();
-      } else {
-        this.applyVisibleChange(cleanValue);
-      }
-      if (cursorExplicit) {
-        this.textAreaController.caretPosition(changedPos);
-        setTimeout(() => {
+        if (cursorExplicit) {
           this.textAreaController.caretPosition(changedPos);
-        }, 20);
-      }
-      this.displayText = this.editorText;
-      this.invalidateLines();
-
-      if (this.lineOffsetDirty) this.buildLineOffsetCache();
-      const clp = this.currentLineNum < this.lineOffsetCache.length
-        ? this.lineOffsetCache[this.currentLineNum] : 0;
-      this.currentLineStart = clp;
-      this.currentLineEnd = clp +
-        (this.currentLineNum < this.cachedLines.length
-          ? this.cachedLines[this.currentLineNum].length : 0);
-
-      if (this.language === 'plaintext' && cleanValue.length > 8) {
-        const d = this.detectLanguage();
-        if (d !== 'plaintext' && this.onLanguageDetect) {
-          this.onLanguageDetect(d);
+          setTimeout(() => {
+            this.textAreaController.caretPosition(changedPos);
+          }, 20);
         }
+        this.displayText = cleanValue;
+        this.invalidateLines();
+
+        this.trackedCursor = changedPos;
+        this.currentLineNum = this.lineFromPosFast(changedPos);
+        this.updateBracketMatching(cleanValue, changedPos);
+
+        if (this.lineOffsetDirty) this.buildLineOffsetCache();
+        const clp2 = this.currentLineNum < this.lineOffsetCache.length
+          ? this.lineOffsetCache[this.currentLineNum] : 0;
+        this.currentLineStart = clp2;
+        this.currentLineEnd = clp2 +
+          (this.currentLineNum < this.cachedLines.length
+            ? this.cachedLines[this.currentLineNum].length : 0);
+
+        this.beginRefresh();
+        this.scrollToCurrentLine();
       }
-
-      this.updateTokens();
-      this.buildLineList();
-      this.scrollToCurrentLine();
-      if (this.onCursorMove) {
-        const ln = this.currentLineNum + 1;
-        let col = 1;
-        for (let j = changedPos - 1; j >= 0; j--) {
-          if (cleanValue.charAt(j) === '\n') {
-            break;
-          }
-          col++;
-        }
-        this.onCursorMove(ln, col);
-      }
-    } else {
-      cleanValue = this.trySelectionWrap(oldText, cleanValue);
-      cleanValue = this.trySmartBackspace(oldText, cleanValue);
-
-      const cursorExplicit = this.autoIndentCaret >= 0;
-      let changedPos: number;
-      if (cursorExplicit) {
-        changedPos = this.autoIndentCaret;
-        this.autoIndentCaret = -1;
-      } else {
-        changedPos = 0;
-        while (changedPos < cleanValue.length &&
-               changedPos < oldText.length &&
-               cleanValue.charAt(changedPos) ===
-               oldText.charAt(changedPos)) {
-          changedPos++;
-        }
-      }
-
-      this.editorText = cleanValue;
-      this.fullText = cleanValue;
-      this.syncStats();
-      if (cursorExplicit) {
-        this.textAreaController.caretPosition(changedPos);
-        setTimeout(() => {
-          this.textAreaController.caretPosition(changedPos);
-        }, 20);
-      }
-      this.displayText = cleanValue;
-      this.invalidateLines();
-
-      this.trackedCursor = changedPos;
-      this.currentLineNum = this.lineFromPosFast(changedPos);
-      this.updateBracketMatching(cleanValue, changedPos);
-
-      if (this.lineOffsetDirty) this.buildLineOffsetCache();
-      const clp2 = this.currentLineNum < this.lineOffsetCache.length
-        ? this.lineOffsetCache[this.currentLineNum] : 0;
-      this.currentLineStart = clp2;
-      this.currentLineEnd = clp2 +
-        (this.currentLineNum < this.cachedLines.length
-          ? this.cachedLines[this.currentLineNum].length : 0);
-
-      this.updateTokens();
-      this.buildLineList();
-      this.scrollToCurrentLine();
+      this.lastHandledText = this.editorText;
+    } finally {
+      this.textChanging = false;
     }
-    this.lastHandledText = this.editorText;
-    this.textChanging = false;
+  }
+
+  /**
+   * 统一刷新：先重建折叠区域（保证 buildRenderTokens 使用最新的折叠状态），
+   * 再更新语法高亮 token 和行列表。
+   * 解决了 Bug7（粘贴后编辑无刷新）和 Bug6（折叠箭头样式不更新）。
+   */
+  private beginRefresh(): void {
+    this.findAllFoldRegions();
+    this.updateTokens();
+    this.buildLineList();
   }
 
   private handleSelectionChange(selStart: number, selEnd: number): void {
@@ -1662,23 +1672,22 @@ export struct EditorAreaImpl {
    * 计算括号嵌套层级，用于分色显示。
    * 参考 VS Code bracket pair colorization。
    */
+  private static readonly OPEN_BRACKETS: Set<string> = new Set(['{', '(', '[']);
+  private static readonly CLOSE_BRACKETS: Set<string> = new Set(['}', ')', ']']);
+  private static readonly CLOSE_TO_OPEN: Record<string, string> = { '}': '{', ']': '[', ')': '(' };
+
   private computeBracketLevels(): void {
     this.bracketLevels = new Map();
-    // 每种括号类型的独立深度栈
     const depth: Map<string, number> = new Map();
     const full = this.fullText;
-    const openBrackets = new Set('{(['.split(''));
-    const closeBrackets = new Set('})]'.split(''));
-    const closeToOpen: Record<string, string> = { '}': '{', ']': '[', ')': '(' };
-
     for (let i = 0; i < full.length; i++) {
       const ch = full.charAt(i);
-      if (openBrackets.has(ch)) {
+      if (EditorAreaImpl.OPEN_BRACKETS.has(ch)) {
         const d = (depth.get(ch) || 0) + 1;
         depth.set(ch, d);
         this.bracketLevels.set(i, d);
-      } else if (closeBrackets.has(ch)) {
-        const open = closeToOpen[ch];
+      } else if (EditorAreaImpl.CLOSE_BRACKETS.has(ch)) {
+        const open = EditorAreaImpl.CLOSE_TO_OPEN[ch];
         if (open) {
           const d = depth.get(open) || 0;
           if (d > 0) {
@@ -1986,7 +1995,7 @@ export struct EditorAreaImpl {
 
   /** 外部折叠全部切换回调。 */
   onFoldAllChange(): void {
-    this.buildLineList();
+    this.findAllFoldRegions();
     if (this.foldAll) {
       for (const r of this.foldRegions) {
         r.collapsed = true;
@@ -1998,6 +2007,7 @@ export struct EditorAreaImpl {
       }
       this.activeFoldCount = 0;
     }
+    this.buildLineList();
     this.buildRenderTokens();
   }
 
@@ -2109,8 +2119,7 @@ export struct EditorAreaImpl {
     this.displayText = result;
     this.lastHandledText = result;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) {
       this.onContentChange(result);
     }
@@ -2142,8 +2151,7 @@ export struct EditorAreaImpl {
     this.displayText = result;
     this.lastHandledText = result;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     this.textAreaController.caretPosition(this.trackedCursor);
   }
 
@@ -2170,8 +2178,7 @@ export struct EditorAreaImpl {
     this.displayText = result;
     this.lastHandledText = result;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(result);
   }
 
@@ -2191,8 +2198,7 @@ export struct EditorAreaImpl {
     this.displayText = t;
     this.lastHandledText = t;
     this.invalidateLines();
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     if (this.onContentChange) this.onContentChange(t);
     setTimeout(() => { this.textAreaController.caretPosition(start + transformed.length); }, 0);
   }
@@ -2391,8 +2397,7 @@ export struct EditorAreaImpl {
         this.onLanguageDetect(detected);
       }
     }
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     this.syncStats();
     this.lastScrollY = 0;
     this.minimapScrollRatio = 0;
@@ -2404,35 +2409,35 @@ export struct EditorAreaImpl {
       this.syncMinimapScroll();
     }, 80);
   }
+  onTabSwitch(): void {
+    this.lastScrollY = 0;
+    this.minimapScrollRatio = 0;
+    setTimeout(() => {
+      this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+      this.lastScrollY = 0;
+      this.syncMinimapScroll();
+    }, 30);
+  }
+
   syncFromExternal(): void {
     const clean = this.replaceCrlf(this.content);
-    if (clean === this.editorText) {
+    if (clean === this.editorText && clean === this.lastHandledText) {
       return;
     }
-    const savedScrollY = this.lastScrollY;
     this.fullText = clean;
     this.editorText = clean;
     this.displayText = clean;
     this.lastHandledText = clean;
     this.invalidateLines();
     this.guessIndentation(clean);
-    this.updateTokens();
-    this.buildLineList();
+    this.beginRefresh();
     this.syncStats();
-    if (savedScrollY > 0) {
-      setTimeout(() => {
-        this.editorScroller.scrollTo({ xOffset: 0, yOffset: savedScrollY, animation: false });
-        this.lastScrollY = savedScrollY;
-        this.syncMinimapScroll();
-      }, 50);
-    } else {
-      this.lastScrollY = 0;
-      this.minimapScrollRatio = 0;
-      setTimeout(() => {
-        this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
-        this.syncMinimapScroll();
-      }, 50);
-    }
+    this.lastScrollY = 0;
+    this.minimapScrollRatio = 0;
+    setTimeout(() => {
+      this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+      this.syncMinimapScroll();
+    }, 50);
   }
 
   /**
@@ -2442,8 +2447,7 @@ export struct EditorAreaImpl {
     if (this.language !== this.lastLang) {
       this.lastLang = this.language;
       setTimeout(() => {
-        this.updateTokens();
-        this.buildLineList();
+        this.beginRefresh();
       }, 0);
     }
   }
@@ -2658,6 +2662,8 @@ export struct EditorAreaImpl {
               if (this.wordWrap) {
                 this.computeWrappedLines();
                 this.buildLineList();
+                this.buildRenderTokens();
+                this.wrapRefreshKey++;
               }
             }
           })
@@ -2666,7 +2672,7 @@ export struct EditorAreaImpl {
       .onScroll((xOffset: number, yOffset: number) => { this.onEditorScroll(xOffset, yOffset); })
       .align(Alignment.TopStart).backgroundColor(this.col().bg).layoutWeight(1)
 
-    // Minimap
+    // Minimap (Bug5: 高度随代码行数动态变化; Bug2: 左对齐)
     if (this.showMinimap && this.editorText.length > 0) {
       Stack({ alignContent: Alignment.TopStart }) {
         Scroll(this.minimapScroller) {
@@ -2681,6 +2687,7 @@ export struct EditorAreaImpl {
             }, (line: string, idx: number) => idx.toString())
           }
           .width(EditorAreaImpl.MINIMAP_WIDTH)
+          .alignItems(HorizontalAlign.Start)
         }
         .scrollBar(BarState.Off)
         .hitTestBehavior(HitTestMode.None)
@@ -2696,7 +2703,7 @@ export struct EditorAreaImpl {
           .hitTestBehavior(HitTestMode.Transparent)
       }
       .width(EditorAreaImpl.MINIMAP_WIDTH)
-      .height('100%')
+      .height(this.minimapContainerHeight())
       .clip(true)
       .border({ width: { left: 1 }, color: this.col().border })
       .onClick((event: ClickEvent) => {

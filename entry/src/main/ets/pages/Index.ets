@@ -98,7 +98,7 @@ struct Index {
 
   private async initRecentFiles(): Promise<void> {
     try {
-      const ctx = getContext(this) as common.UIAbilityContext;
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.recentPrefs = await preferences.getPreferences(ctx, 'recent_files');
       const data = this.recentPrefs.getSync('uris', '');
       if (data && typeof data === 'string' && data.length > 0) {
@@ -121,8 +121,10 @@ struct Index {
 
   private persistRecentFiles(): void {
     if (this.recentPrefs) {
-      this.recentPrefs.putSync('uris', this.recentFiles.join('|'));
-      this.recentPrefs.flush();
+      try {
+        this.recentPrefs.putSync('uris', this.recentFiles.join('|'));
+        this.recentPrefs.flush();
+      } catch (_) {}
     }
   }
 
@@ -157,12 +159,26 @@ struct Index {
       window.getLastWindow(ctx).then((w) => {
         AppStorage.setOrCreate('mainWindow', w);
         w.setWindowTitle('LivelyNotepad');
+        this.applySystemBars(w, dark);
       });
     } catch (_) {
       AppStorage.setOrCreate('currentColorMode', 'light');
     }
     this.restoreSession();
     this.initRecentFiles();
+  }
+
+  private applySystemBars(w: window.Window, dark: boolean): void {
+    const bgColor = dark ? '#1E1E1E' : '#FFFFFF';
+    const iconLight = dark;
+    try {
+      w.setWindowSystemBarProperties({
+        statusBarColor: bgColor,
+        navigationBarColor: bgColor,
+        isStatusBarLightIcon: iconLight,
+        isNavigationBarLightIcon: iconLight
+      });
+    } catch (_) {}
   }
 
   private applySystemColorMode(): void {
@@ -186,6 +202,10 @@ struct Index {
     this.getUIContext().animateTo({ duration: 300, curve: Curve.Smooth }, () => {
       AppStorage.setOrCreate('currentColorMode', dark ? 'dark' : 'light');
     });
+    const w = AppStorage.get<window.Window>('mainWindow');
+    if (w) {
+      this.applySystemBars(w, dark);
+    }
   }
 
   // ==================== 会话持久化（内联实现，避免外部编译依赖） ====================
@@ -495,6 +515,10 @@ struct Index {
     this.getUIContext().animateTo({ duration: 300, curve: Curve.Smooth }, () => {
       AppStorage.setOrCreate('currentColorMode', newMode);
     });
+    const w = AppStorage.get<window.Window>('mainWindow');
+    if (w) {
+      this.applySystemBars(w, newMode === 'dark');
+    }
   }
 
   /** 插入当前日期时间 */
@@ -911,37 +935,38 @@ struct Index {
     } catch (_) {}
   }
 
+  /** 语言名称映射表（模块级常量，避免每次调用重建 20+ 条目） */
+  private readonly langNameMap: Map<string, string> = (() => {
+    const m = new Map<string, string>();
+    m.set('javascript', 'JavaScript');
+    m.set('typescript', 'TypeScript');
+    m.set('arkts', 'ArkTS');
+    m.set('html', 'HTML');
+    m.set('css', 'CSS');
+    m.set('json', 'JSON');
+    m.set('xml', 'XML');
+    m.set('markdown', 'Markdown');
+    m.set('python', 'Python');
+    m.set('java', 'Java');
+    m.set('c', 'C');
+    m.set('cpp', 'C++');
+    m.set('csharp', 'C#');
+    m.set('go', 'Go');
+    m.set('rust', 'Rust');
+    m.set('swift', 'Swift');
+    m.set('sql', 'SQL');
+    m.set('shell', 'Shell');
+    m.set('yaml', 'YAML');
+    m.set('toml', 'TOML');
+    m.set('plaintext', '纯文本');
+    return m;
+  })();
+
   /**
    * 将 ProgrammingLanguage 枚举值映射为中文显示名称。
-   * 用于状态栏和语言菜单显示。
    */
   private getLanguageName(lang: ProgrammingLanguage): string {
-    const map = new Map<string, string>();
-    // 前端 / Web
-    map.set('javascript', 'JavaScript');
-    map.set('typescript', 'TypeScript');
-    map.set('arkts', 'ArkTS');
-    map.set('html', 'HTML');
-    map.set('css', 'CSS');
-    map.set('json', 'JSON');
-    map.set('xml', 'XML');
-    map.set('markdown', 'Markdown');
-    // 后端语言
-    map.set('python', 'Python');
-    map.set('java', 'Java');
-    map.set('c', 'C');
-    map.set('cpp', 'C++');
-    map.set('csharp', 'C#');
-    map.set('go', 'Go');
-    map.set('rust', 'Rust');
-    map.set('swift', 'Swift');
-    map.set('sql', 'SQL');
-    // 脚本 / 配置
-    map.set('shell', 'Shell');
-    map.set('yaml', 'YAML');
-    map.set('toml', 'TOML');
-    map.set('plaintext', '纯文本');
-    const name = map.get(lang);
+    const name = this.langNameMap.get(lang);
     return name !== undefined ? name : '纯文本';
   }
 

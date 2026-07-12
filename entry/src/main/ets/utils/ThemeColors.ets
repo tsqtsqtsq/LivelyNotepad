@@ -55,7 +55,7 @@ export const DARK_THEME: ThemeColors = {
   divider: '#444444',
   searchMark: '#FF6666',
   bracketMatchBg: 'rgba(255, 255, 255, 0.12)',
-  currentLineBg: 'rgba(255, 255, 255, 0.07)',
+  currentLineBg: 'rgba(255, 255, 255, 0.08)',
   indentGuide: '#3C3C3C',
   danger: '#F44747'
 };
@@ -84,7 +84,7 @@ export const LIGHT_THEME: ThemeColors = {
   divider: '#D0D0D0',
   searchMark: '#FF0000',
   bracketMatchBg: 'rgba(0, 0, 0, 0.08)',
-  currentLineBg: 'rgba(0, 0, 255, 0.06)',
+  currentLineBg: 'rgba(0, 0, 220, 0.08)',
   indentGuide: '#D0D0D0',
   danger: '#E84040'
 };
