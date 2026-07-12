@@ -156,7 +156,7 @@ KEYWORDS.set('kotlin', new Set([
   'lazy', 'suspend', 'constructor', 'init', 'annotation'
 ]));
 KEYWORDS.set('toml', new Set([
-  'true', 'false'
+  'true', 'false', 'inf', 'nan', 'yes', 'no', 'on', 'off'
 ]));
 KEYWORDS.set('plaintext', new Set([]));
 
@@ -385,4 +385,15 @@ export class Highlighter {
            (ch >= 'A' && ch <= 'Z') ||
            ch === '_' || ch === '$';
   }
+}
+
+export function isKeywordForLanguage(word: string, lang: ProgrammingLanguage): boolean {
+  const kwSet = KEYWORDS.get(lang);
+  if (kwSet === undefined) return false;
+  return kwSet.has(word);
+}
+
+export function getKeywordCount(lang: ProgrammingLanguage): number {
+  const kwSet = KEYWORDS.get(lang);
+  return kwSet !== undefined ? kwSet.size : 0;
 }

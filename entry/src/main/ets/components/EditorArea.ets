@@ -340,7 +340,10 @@ export struct EditorAreaImpl {
     if (pos <= 0) return false;
     // 提取光标前的单词
     let start = pos - 1;
-    while (start >= 0 && /[a-zA-Z]/.test(text.charAt(start))) start--;
+    while (start >= 0) {
+      const c = text.charCodeAt(start);
+      if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { start--; } else { break; }
+    }
     start++;
     const word = text.substring(start, pos);
     if (word.length === 0) return false;
@@ -1021,7 +1024,9 @@ export struct EditorAreaImpl {
         const remove = line.length % indent.length === 0 ? indent.length : line.length % indent.length;
         if (remove > 0 && remove <= line.length) {
           this.autoIndentCaret = d.start - remove;
-          return oldText.substring(0, d.start - line.length) + line.substring(remove) + oldText.substring(d.start + 1);
+          const cutStart = d.start - line.length;
+          if (cutStart < 0) return newText;
+          return oldText.substring(0, cutStart) + line.substring(remove) + oldText.substring(d.start + 1);
         }
       }
     }
@@ -1293,9 +1298,6 @@ export struct EditorAreaImpl {
       this.buildLineList();
       this.buildRenderTokens();
       this.scrollToCurrentLine();
-      if (this.onContentChange) {
-        this.onContentChange(this.editorText);
-      }
       if (this.onCursorMove) {
         const ln = this.currentLineNum + 1;
         let col = 1;
@@ -1351,9 +1353,6 @@ export struct EditorAreaImpl {
       this.buildLineList();
       this.buildRenderTokens();
       this.scrollToCurrentLine();
-      if (this.onContentChange) {
-        this.onContentChange(this.editorText);
-      }
     }
   }
 
@@ -1411,18 +1410,18 @@ export struct EditorAreaImpl {
    */
   private detectLanguage(): string {
     const t = this.fullText;
-    if (t.length < 8) {
-      return 'plaintext';
-    }
-    if (t.indexOf('@Component') >= 0) {
-      return 'arkts';
-    }
-    if (t.indexOf('#include') >= 0) {
-      return 'cpp';
-    }
-    if (t.indexOf('using namespace') >= 0) {
-      return 'cpp';
-    }
+    if (t.length < 8) return 'plaintext';
+    if (t.indexOf('@Component') >= 0 || t.indexOf('@Entry') >= 0 || t.indexOf('@Builder') >= 0) return 'arkts';
+    if (t.indexOf('#include') >= 0) return 'cpp';
+    if (t.indexOf('using namespace') >= 0) return 'cpp';
+    if (t.indexOf('def ') >= 0 && t.indexOf('self') >= 0) return 'python';
+    if (t.indexOf('import java.') >= 0 || t.indexOf('public class') >= 0) return 'java';
+    if (t.indexOf('package main') >= 0 || t.indexOf('func main') >= 0) return 'go';
+    if (t.indexOf('fn main') >= 0 || t.indexOf('let mut') >= 0) return 'rust';
+    if (t.indexOf('<!DOCTYPE html') >= 0 || t.indexOf('<html') >= 0) return 'html';
+    if (t.indexOf('<?xml') >= 0) return 'xml';
+    if (t.indexOf('SELECT ') >= 0 && t.indexOf('FROM ') >= 0) return 'sql';
+    if (t.indexOf('#!/bin/bash') >= 0 || t.indexOf('#!/bin/sh') >= 0) return 'shell';
     return 'plaintext';
   }
 
@@ -1539,6 +1538,7 @@ export struct EditorAreaImpl {
     }
     // 过滤 Token：跳过折叠区域内的 Token
     for (const tok of this.tokens) {
+      if (tok.text.length === 0) { pos += tok.text.length; continue; }
       let skip = false;
       for (const rr of cr) {
         if (pos >= rr[0] && pos + tok.text.length <= rr[1] + 1) {
@@ -2021,22 +2021,21 @@ export struct EditorAreaImpl {
     const text = this.editorText;
     const pos = this.trackedCursor;
     if (pos < 0 || pos >= text.length) return;
-    // 找光标所在位置的完整单词
     let start = pos;
     while (start > 0 && this.isWordCharAt(text, start - 1)) start--;
     let end = pos;
     while (end < text.length && this.isWordCharAt(text, end)) end++;
     const word = text.substring(start, end);
-    if (word.length < 2) return; // 单字符不亮
-    // 搜索全文
+    if (word.length < 2) return;
     this.wordHighlightLen = word.length;
     let idx = 0;
+    const maxHighlights = 100;
     while ((idx = text.indexOf(word, idx)) !== -1) {
-      // 确保是完整单词（前后非单词字符）
       const bOk = idx === 0 || !this.isWordCharAt(text, idx - 1);
       const aOk = idx + word.length >= text.length || !this.isWordCharAt(text, idx + word.length);
       if (bOk && aOk) {
         this.wordHighlightPositions.push(idx);
+        if (this.wordHighlightPositions.length >= maxHighlights) break;
       }
       idx++;
     }
@@ -2314,7 +2313,7 @@ export struct EditorAreaImpl {
             if (this.tokens.length > 0) {
               Text() {
                 ForEach(this.renderTokens, (tok: TokenRender, i: number) => {
-                  Span(tok.text.replace(/%/g, '%%'))
+                  Span(this.escapePercent(tok.text))
                     .fontColor(this.spanColor(tok.tokenType, tok.startIndex))
                     .backgroundColor(this.mergeBg(tok.startIndex))
                     .decoration({ type: this.matchDecoration(tok.startIndex),
@@ -2360,18 +2359,34 @@ export struct EditorAreaImpl {
     // Minimap
     if (this.showMinimap && this.editorText.length > 0) {
       Stack({ alignContent: Alignment.TopStart }) {
-        Text(this.editorText)
-          .fontSize(1).fontFamily('monospace').lineHeight(1)
-          .fontColor(this.col().textSecondary)
-          .width(60).textAlign(TextAlign.Start)
-          .textOverflow({ overflow: TextOverflow.Clip })
-          .hitTestBehavior(HitTestMode.None).focusable(false)
+        Column() {
+          ForEach(this.getLines(), (line: string, idx: number) => {
+            Row()
+              .width(Math.min(56, Math.max(4, line.length * 0.8)))
+              .height(1)
+              .backgroundColor(this.col().textSecondary)
+              .opacity(0.3)
+              .margin({ left: this.getLineIndent(line) * 0.5 })
+          }, (line: string, idx: number) => idx.toString())
+        }
+        .width(60)
+        .hitTestBehavior(HitTestMode.None)
+        .focusable(false)
+
+        Row()
+          .width(60)
+          .height(this.minimapSliderHeight())
+          .backgroundColor(this.col().accent)
+          .opacity(0.15)
+          .offset({ y: this.minimapSliderOffset() })
+          .hitTestBehavior(HitTestMode.None)
       }
-      .width(60).height('100%')
+      .width(60)
+      .height('100%')
       .clip(true)
       .border({ width: { left: 1 }, color: this.col().border })
       .onClick((event: ClickEvent) => {
-        const h = Number(event.target?.area?.height);
+        const h = Number(event.target.area.height);
         if (h > 0) {
           const ratio = event.y / h;
           const totalH = this.getLines().length * this.lineH();

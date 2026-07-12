@@ -4,12 +4,14 @@ import { ThemeColors } from '../utils/ThemeColors';
 import { EditorTabBarImpl as EditorTabBar, TabItem } from '../components/EditorTabBar';
 import { EditorAreaImpl as EditorArea } from '../components/EditorArea';
 import { FindReplaceBarImpl as FindReplaceBar } from '../components/FindReplaceBar';
+import { StatusBarImpl as StatusBar } from '../components/StatusBar';
 import { picker, fileIo } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { common, ConfigurationConstant, Configuration } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { TipsDialog } from '@kit.ArkUI';
 import { window } from '@kit.ArkUI';
+import { preferences } from '@kit.ArkData';
 
 interface SessionTabRecord {
   id: string;
@@ -92,6 +94,18 @@ struct Index {
   // 最近文件列表
   private recentFiles: string[] = [];
   private recentMax: number = 10;
+  private recentPrefs: preferences.Preferences | undefined = undefined;
+
+  private async initRecentFiles(): Promise<void> {
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      this.recentPrefs = await preferences.getPreferences(ctx, 'recent_files');
+      const data = this.recentPrefs.getSync('uris', '');
+      if (data && typeof data === 'string' && data.length > 0) {
+        this.recentFiles = data.split('|');
+      }
+    } catch (_) {}
+  }
 
   private addRecentFile(uri: string): void {
     const idx = this.recentFiles.indexOf(uri);
@@ -101,6 +115,14 @@ struct Index {
     this.recentFiles.unshift(uri);
     if (this.recentFiles.length > this.recentMax) {
       this.recentFiles.pop();
+    }
+    this.persistRecentFiles();
+  }
+
+  private persistRecentFiles(): void {
+    if (this.recentPrefs) {
+      this.recentPrefs.putSync('uris', this.recentFiles.join('|'));
+      this.recentPrefs.flush();
     }
   }
 
@@ -129,23 +151,24 @@ struct Index {
   aboutToAppear(): void {
     AppStorage.setOrCreate('wordWrap', true);
     AppStorage.setOrCreate('fontSize', 16);
-    this.applySystemColorMode();
-    // 获取主窗口，用于设置标题
     try {
-      const ctx = getContext(this) as common.UIAbilityContext;
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const dark = ctx.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+      AppStorage.setOrCreate('currentColorMode', dark ? 'dark' : 'light');
       window.getLastWindow(ctx).then((w) => {
         AppStorage.setOrCreate('mainWindow', w);
         w.setWindowTitle('LivelyNotepad');
       });
-    } catch (_) {}
-
-    // VS Code Hot Exit：从磁盘恢复上次会话
+    } catch (_) {
+      AppStorage.setOrCreate('currentColorMode', 'light');
+    }
     this.restoreSession();
+    this.initRecentFiles();
   }
 
   private applySystemColorMode(): void {
     try {
-      const ctx = getContext(this) as common.UIAbilityContext;
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const dark = ctx.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
       AppStorage.setOrCreate('currentColorMode', dark ? 'dark' : 'light');
     } catch (e) {
@@ -161,7 +184,7 @@ struct Index {
 
   onConfigurationUpdate(newConfig: Configuration): void {
     const dark = newConfig.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
-    animateTo({ duration: 300, curve: Curve.Smooth }, () => {
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.Smooth }, () => {
       AppStorage.setOrCreate('currentColorMode', dark ? 'dark' : 'light');
     });
   }
@@ -169,7 +192,12 @@ struct Index {
   // ==================== 会话持久化（内联实现，避免外部编译依赖） ====================
 
   private getSessionPath(): string {
-    return getContext(this).filesDir + '/session_backup.json';
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      return ctx.filesDir + '/session_backup.json';
+    } catch (_) {
+      return '/data/session_backup.json';
+    }
   }
 
   private saveSession(): void {
@@ -248,6 +276,7 @@ struct Index {
             }
             this.tabManager.activeTabId = data.activeTabId;
             this.activeId = data.activeTabId;
+            this.tabManager.rebuildTabMap();
           }
         }
       }
@@ -258,7 +287,6 @@ struct Index {
         try { fileIo.closeSync(file); } catch (e) { /* 静默 */ }
       }
     }
-    // 没有恢复成功则不自动创建标签——显示欢迎页
   }
 
   onPageShow(): void {
@@ -307,7 +335,7 @@ struct Index {
   private onNewFile(): void {
     const count = this.tabManager.getTabCount();
     const tab = this.tabManager.createNewTab('新建文件 ' + (count + 1), '', '');
-    animateTo({ duration: 250, curve: Curve.Smooth }, () => {
+    this.getUIContext().animateTo({ duration: 250, curve: Curve.Smooth }, () => {
       this.activeId = tab.id;
     });
   }
@@ -346,13 +374,23 @@ struct Index {
     if (!tab) {
       return;
     }
-    // 去除行尾空格（保存时自动清理）
-    const cleaned = tab.content.replace(/[ \t]+$/gm, '');
-    if (cleaned !== tab.content) {
-      this.tabManager.updateTabContent(tab.id, cleaned);
+    const raw = tab.content;
+    const lines = raw.split('\n');
+    const cleaned: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+      let end = line.length;
+      while (end > 0 && (line.charAt(end - 1) === ' ' || line.charAt(end - 1) === '\t')) {
+        end--;
+      }
+      cleaned.push(line.substring(0, end));
+    }
+    const cleanContent = cleaned.join('\n');
+    if (cleanContent !== raw) {
+      this.tabManager.updateTabContent(tab.id, cleanContent);
     }
     if (tab.filePath) {
-      FileService.writeFile(tab.filePath, cleaned).then((): void => {
+      FileService.writeFile(tab.filePath, cleanContent).then((): void => {
         this.tabManager.saveTab(tab.id);
         this.updateStatusBar();
       }).catch((err: Error): void => {
@@ -455,7 +493,7 @@ struct Index {
   /** 切换暗色/亮色主题 */
   private toggleTheme(): void {
     const newMode = this.currentColorMode === 'dark' ? 'light' : 'dark';
-    animateTo({ duration: 300, curve: Curve.Smooth }, () => {
+    this.getUIContext().animateTo({ duration: 300, curve: Curve.Smooth }, () => {
       AppStorage.setOrCreate('currentColorMode', newMode);
     });
   }
@@ -713,7 +751,7 @@ struct Index {
 
   /** 切换标签 */
   private onTabSwitch(tabId: string): void {
-    animateTo({ duration: 200, curve: Curve.Smooth }, () => {
+    this.getUIContext().animateTo({ duration: 200, curve: Curve.Smooth }, () => {
       this.activeId = tabId;
       this.tabManager.setActiveTab(tabId);
     });
@@ -722,18 +760,20 @@ struct Index {
 
   /** 关闭标签 */
   private onTabClose(tabId: string): void {
-    const tab = this.tabManager.getAllTabs().find(t => t.id === tabId);
+    const tab = this.tabManager.getTabById(tabId);
     if (tab && tab.isModified) {
-      AlertDialog.show({
+      this.getUIContext().getPromptAction().showDialog({
         title: '未保存的更改',
         message: '文件 "' + tab.label + '" 有未保存的更改，是否关闭？',
-        autoCancel: true,
-        alignment: DialogAlignment.Center,
         buttons: [
-          { value: '关闭', fontColor: this.col().danger, action: (): void => { this.doCloseTab(tabId); } },
-          { value: '取消', action: (): void => {} }
+          { text: '关闭', color: this.col().danger },
+          { text: '取消', color: this.col().textSecondary }
         ]
-      });
+      }).then((result) => {
+        if (result.index === 0) {
+          this.doCloseTab(tabId);
+        }
+      }).catch(() => {});
     } else {
       this.doCloseTab(tabId);
     }
@@ -836,7 +876,22 @@ struct Index {
     if (!tab || !tab.content) return;
     const cur = tab.content.includes('\r\n') ? 'CRLF' :
       tab.content.includes('\r') ? 'CR' : 'LF';
-    const lines = tab.content.split(new RegExp('\\r\\n|\\r|\\n'));
+    let lines: string[] = [];
+    let idx = 0;
+    const src = tab.content;
+    while (idx < src.length) {
+      let start = idx;
+      while (idx < src.length && src.charAt(idx) !== '\n' && src.charAt(idx) !== '\r') {
+        idx++;
+      }
+      lines.push(src.substring(start, idx));
+      if (idx < src.length && src.charAt(idx) === '\r') {
+        idx++;
+      }
+      if (idx < src.length && src.charAt(idx) === '\n') {
+        idx++;
+      }
+    }
     this.tabManager.pushUndo(tab.id, tab.content);
     if (cur === 'LF') {
       this.tabManager.updateTabContent(tab.id, lines.join('\r\n'));
@@ -850,7 +905,7 @@ struct Index {
 
   private setWindowTitle(title: string): void {
     try {
-      const w = AppStorage.get('mainWindow') as Record<string, Function>;
+      const w = AppStorage.get<window.Window>('mainWindow');
       if (w) {
         w.setWindowTitle(title);
       }
@@ -1396,29 +1451,23 @@ struct Index {
   }
 
   private showFeedback(): void {
-    AlertDialog.show({
+    this.getUIContext().getPromptAction().showDialog({
       title: '问题与建议',
       message: '如有问题或改进建议，欢迎发送邮件至：\n\nazazaz0413@petalmail.com',
-      autoCancel: true,
-      alignment: DialogAlignment.Center,
       buttons: [
-        {
-          value: '复制邮箱',
-          action: (): void => {
-            const pasteData = pasteboard.createData(
-              pasteboard.MIMETYPE_TEXT_PLAIN,
-              'azazaz0413@petalmail.com'
-            );
-            const systemPasteboard = pasteboard.getSystemPasteboard();
-            systemPasteboard.setData(pasteData);
-          }
-        },
-        {
-          value: '关闭',
-          action: (): void => {}
-        }
+        { text: '复制邮箱', color: this.col().accent },
+        { text: '关闭', color: this.col().textSecondary }
       ]
-    });
+    }).then((result) => {
+      if (result.index === 0) {
+        const pasteData = pasteboard.createData(
+          pasteboard.MIMETYPE_TEXT_PLAIN,
+          'azazaz0413@petalmail.com'
+        );
+        const systemPasteboard = pasteboard.getSystemPasteboard();
+        systemPasteboard.setData(pasteData);
+      }
+    }).catch(() => {});
   }
 
   private showAbout(): void {
@@ -1586,68 +1635,23 @@ struct Index {
 
   @Builder
   buildStatusBar() {
-    Row() {
-      Text(this.fileType)
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 12, right: 8 })
-        .bindMenu(this.buildLangMenu)
-
-      Text('  ' + this.fileEncoding)
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 4, right: 4 })
-        .bindMenu(this.buildEncodingMenu)
-
-      Text('  ' + this.eolDisplay())
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 4, right: 4 })
-        .onClick((): void => { this.toggleEOL(); })
-
-      Text('  ' + (this.insertMode ? '插入' : '覆盖'))
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 4, right: 4 })
-        .onClick((): void => { this.insertMode = !this.insertMode; })
-
-      Text('  ' + (AppStorage.get('indentType') as string || '空格:4'))
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 4, right: 4 })
-
-      Divider()
-        .vertical(true)
-        .height(14)
-        .color(this.col().divider)
-
-      Text('共 ' + this.totalLines + ' 行 · ' + this.totalChars + ' 字')
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .padding({ left: 8, right: 8 })
-
-      Text(this.selectionStats)
-        .fontSize(12)
-        .fontColor(this.col().accent)
-        .padding({ left: 8, right: 8 })
-
-      Blank()
-
-      Text('行: ' + this.cursorLine + '  列: ' + this.cursorColumn)
-        .fontSize(12)
-        .fontColor(this.col().textSecondary)
-        .scale({ x: this.cursorPulse, y: this.cursorPulse })
-        .padding({ left: 8, right: 8 })
-        .onClick((): void => { this.showGoToLine = true; })
-    }
-    .width('100%')
-    .height(24)
-    .backgroundColor(this.col().statusBarBg)
-    .animation({ duration: 100, curve: Curve.Linear })
-    .border({
-      width: { top: 1 },
-      color: this.col().border
+    StatusBar({
+      fileType: this.fileType,
+      fileEncoding: this.fileEncoding,
+      eolDisplay: this.eolDisplay(),
+      insertMode: this.insertMode,
+      totalLines: this.totalLines,
+      totalChars: this.totalChars,
+      cursorLine: this.cursorLine,
+      cursorColumn: this.cursorColumn,
+      cursorPulse: this.cursorPulse,
+      selectionStats: this.selectionStats,
+      indentType: AppStorage.get<string>('indentType') || '空格:4',
+      langMenuBuilder: this.buildLangMenu,
+      encodingMenuBuilder: this.buildEncodingMenu,
+      onEolClick: (): void => { this.toggleEOL(); },
+      onInsertModeClick: (): void => { this.insertMode = !this.insertMode; },
+      onCursorClick: (): void => { this.showGoToLine = true; }
     })
-    .alignItems(VerticalAlign.Center)
   }
 }

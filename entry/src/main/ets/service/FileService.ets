@@ -8,26 +8,27 @@ import { LineEndingType } from '../model/TabModel';
  * 负责文件的打开、保存、另存为等操作
  */
 export class FileService {
-  /**
-   * 读取文件内容
-   */
   static readFile(filePath: string, encoding: string = 'utf-8'): Promise<string> {
     return new Promise<string>((resolve: (value: string) => void, reject: (reason: Error) => void) => {
       let file: fileIo.File | undefined;
       try {
         file = fileIo.openSync(filePath, fileIo.OpenMode.READ_ONLY);
         const stat = fileIo.statSync(filePath);
+        if (stat.size === 0) {
+          resolve('');
+          return;
+        }
         const buffer = new ArrayBuffer(stat.size);
-        fileIo.readSync(file.fd, buffer);
+        const readLen = fileIo.readSync(file.fd, buffer);
         const decoder = new util.TextDecoder(encoding);
-        const content: string = decoder.decodeWithStream(new Uint8Array(buffer));
+        const content: string = decoder.decodeWithStream(new Uint8Array(buffer, 0, readLen));
         resolve(content);
       } catch (err) {
-        const msg = err instanceof Error ? (err as Error).message : String(err);
-        reject(new Error('读取文件失败: ' + msg));
+        const e = err instanceof Error ? err as Error : new Error(String(err));
+        reject(new Error('读取文件失败: ' + e.message));
       } finally {
         if (file) {
-          try { fileIo.closeSync(file); } catch (e) { /* 静默 */ }
+          try { fileIo.closeSync(file); } catch (e) { /* silent */ }
         }
       }
     });
@@ -57,31 +58,21 @@ export class FileService {
     });
   }
 
-  /**
-   * 从完整路径中提取文件名
-   */
   static getFileName(fullPath: string): string {
-    if (!fullPath) {
-      return '新建文件';
-    }
-    const lastSep = fullPath.lastIndexOf('/');
-    if (lastSep >= 0) {
-      return fullPath.substring(lastSep + 1);
-    }
+    if (!fullPath) return '新建文件';
+    const lastSlash = fullPath.lastIndexOf('/');
+    const lastBackslash = fullPath.lastIndexOf('\\');
+    const lastSep = Math.max(lastSlash, lastBackslash);
+    if (lastSep >= 0) return fullPath.substring(lastSep + 1);
     return fullPath;
   }
 
-  /**
-   * 从完整路径中提取目录路径
-   */
   static getDirectoryPath(fullPath: string): string {
-    if (!fullPath) {
-      return '';
-    }
-    const lastSep = fullPath.lastIndexOf('/');
-    if (lastSep >= 0) {
-      return fullPath.substring(0, lastSep);
-    }
+    if (!fullPath) return '';
+    const lastSlash = fullPath.lastIndexOf('/');
+    const lastBackslash = fullPath.lastIndexOf('\\');
+    const lastSep = Math.max(lastSlash, lastBackslash);
+    if (lastSep >= 0) return fullPath.substring(0, lastSep);
     return '';
   }
 

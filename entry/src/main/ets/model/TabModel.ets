@@ -96,11 +96,15 @@ export class TabModel {
     if (!this.content || this.content.length === 0) {
       return 1;
     }
-    return this.content.split(new RegExp('\\r\\n|\\r|\\n')).length;
+    let count = 1;
+    for (let i = 0; i < this.content.length; i++) {
+      if (this.content.charAt(i) === '\n') count++;
+    }
+    return count;
   }
 
   getLine(lineIndex: number): string {
-    const lines = this.content.split(new RegExp('\\r\\n|\\r|\\n'));
+    const lines = this.content.split('\n');
     if (lineIndex >= 0 && lineIndex < lines.length) {
       return lines[lineIndex];
     }
@@ -253,6 +257,7 @@ export class TabStateManager {
   private redoStacks: Map<string, string[]> = new Map();
   /** 最大历史记录数 */
   private readonly maxHistory: number = 50;
+  private tabMap: Map<string, TabModel>;
 
   /** 触发 tabs 数组的响应式更新（@Observed 不追踪数组内部变异） */
   private triggerTabsChange(): void {
@@ -266,6 +271,7 @@ export class TabStateManager {
     this.listeners = [];
     this.undoStacks = new Map();
     this.redoStacks = new Map();
+    this.tabMap = new Map();
   }
 
   /**
@@ -277,58 +283,37 @@ export class TabStateManager {
     }
     const stack = this.undoStacks.get(tabId);
     if (!stack) return;
-    // 避免重复记录相同内容
     if (stack.length === 0 || stack[stack.length - 1] !== content) {
       stack.push(content);
       if (stack.length > this.maxHistory) {
         stack.shift();
       }
-      // 新操作清空重做栈
       this.redoStacks.set(tabId, []);
     }
   }
 
-  /**
-   * 撤销
-   */
   undo(tabId: string): string | null {
     const stack = this.undoStacks.get(tabId);
-    if (!stack || stack.length < 2) {
-      return null;
-    }
-    // 当前内容入重做栈
-    const current = stack.pop();
-    if (current === undefined) return null;
-    if (!this.redoStacks.has(tabId)) {
-      this.redoStacks.set(tabId, []);
-    }
+    if (!stack || stack.length < 1) return null;
+    const currentContent = this.tabMap.get(tabId)?.content;
+    if (currentContent === undefined) return null;
+    if (!this.redoStacks.has(tabId)) this.redoStacks.set(tabId, []);
     const redoStack = this.redoStacks.get(tabId);
-    if (redoStack) {
-      redoStack.push(current);
-    }
-    // 返回上一个快照
-    return stack[stack.length - 1];
+    if (redoStack) redoStack.push(currentContent);
+    const previous = stack.pop();
+    return previous !== undefined ? previous : null;
   }
 
-  /**
-   * 重做
-   */
   redo(tabId: string): string | null {
     const redoStack = this.redoStacks.get(tabId);
-    if (!redoStack || redoStack.length === 0) {
-      return null;
-    }
-    const next = redoStack.pop();
-    if (next === undefined) return null;
-    // 推入撤销栈
-    if (!this.undoStacks.has(tabId)) {
-      this.undoStacks.set(tabId, []);
-    }
+    if (!redoStack || redoStack.length === 0) return null;
+    const currentContent = this.tabMap.get(tabId)?.content;
+    if (currentContent === undefined) return null;
+    if (!this.undoStacks.has(tabId)) this.undoStacks.set(tabId, []);
     const undoStack = this.undoStacks.get(tabId);
-    if (undoStack) {
-      undoStack.push(next);
-    }
-    return next;
+    if (undoStack) undoStack.push(currentContent);
+    const next = redoStack.pop();
+    return next !== undefined ? next : null;
   }
 
   /** 关闭标签时清理历史 */
@@ -355,6 +340,7 @@ export class TabStateManager {
       : ProgrammingLanguage.PLAIN_TEXT;
     const tab = new TabModel(id, label, filePath, content, language);
     this.tabs.push(tab);
+    this.tabMap.set(tab.id, tab);
     this.triggerTabsChange();
     this.setActiveTab(id);
     this.notifyListeners(TabStateEventType.TAB_OPENED, tab);
@@ -365,8 +351,7 @@ export class TabStateManager {
    * 打开文件作为新标签页
    */
   openFile(label: string, filePath: string, content: string): TabModel {
-    // 检查文件是否已经打开
-    const existingTab = this.tabs.find(t => t.filePath === filePath);
+    const existingTab = this.tabs.find((t: TabModel) => t.filePath === filePath);
     if (existingTab) {
       this.setActiveTab(existingTab.id);
       return existingTab;
@@ -377,6 +362,7 @@ export class TabStateManager {
     const tab = new TabModel(id, label, filePath, content, language);
     tab.fileSize = content.length;
     this.tabs.push(tab);
+    this.tabMap.set(tab.id, tab);
     this.triggerTabsChange();
     this.setActiveTab(id);
     this.notifyListeners(TabStateEventType.TAB_OPENED, tab);
@@ -387,19 +373,19 @@ export class TabStateManager {
    * 关闭标签页
    */
   closeTab(tabId: string): boolean {
-    const index = this.tabs.findIndex(t => t.id === tabId);
+    const index = this.tabs.findIndex((t: TabModel) => t.id === tabId);
     if (index === -1) {
       return false;
     }
 
     const closedTab = this.tabs[index];
     this.tabs.splice(index, 1);
+    this.tabMap.delete(tabId);
     this.triggerTabsChange();
 
     this.clearHistory(tabId);
     if (this.activeTabId === tabId) {
       if (this.tabs.length > 0) {
-        // 激活相邻的标签页
         const newActiveIndex = Math.min(index, this.tabs.length - 1);
         this.activeTabId = this.tabs[newActiveIndex].id;
         this.tabs[newActiveIndex].isActive = true;
@@ -416,14 +402,12 @@ export class TabStateManager {
    * 设置活动标签页
    */
   setActiveTab(tabId: string): void {
-    // 取消当前活动标签
     const currentActive = this.getActiveTab();
     if (currentActive) {
       currentActive.isActive = false;
     }
 
-    // 设置新活动标签
-    const tab = this.tabs.find(t => t.id === tabId);
+    const tab = this.tabMap.get(tabId);
     if (tab) {
       tab.isActive = true;
       this.activeTabId = tabId;
@@ -435,7 +419,11 @@ export class TabStateManager {
    * 获取活动标签页
    */
   getActiveTab(): TabModel | undefined {
-    return this.tabs.find(t => t.id === this.activeTabId);
+    return this.tabMap.get(this.activeTabId);
+  }
+
+  getTabById(tabId: string): TabModel | undefined {
+    return this.tabMap.get(tabId);
   }
 
   /**
@@ -453,10 +441,20 @@ export class TabStateManager {
   }
 
   /**
+   * 重建 tabMap（在绕过 createNewTab/openFile 直接操作 tabs 数组后调用）
+   */
+  rebuildTabMap(): void {
+    this.tabMap = new Map();
+    for (let i = 0; i < this.tabs.length; i++) {
+      this.tabMap.set(this.tabs[i].id, this.tabs[i]);
+    }
+  }
+
+  /**
    * 更新标签页内容
    */
   updateTabContent(tabId: string, content: string): void {
-    const tab = this.tabs.find(t => t.id === tabId);
+    const tab = this.tabMap.get(tabId);
     if (tab) {
       tab.content = content;
       tab.markModified();
@@ -469,7 +467,7 @@ export class TabStateManager {
    * 保存标签页文件
    */
   saveTab(tabId: string): void {
-    const tab = this.tabs.find(t => t.id === tabId);
+    const tab = this.tabMap.get(tabId);
     if (tab) {
       tab.markSaved();
       tab.fileSize = tab.content.length;
@@ -481,7 +479,7 @@ export class TabStateManager {
    * 更新标签页标签名
    */
   updateTabLabel(tabId: string, newLabel: string): void {
-    const tab = this.tabs.find(t => t.id === tabId);
+    const tab = this.tabMap.get(tabId);
     if (tab) {
       tab.label = newLabel;
       this.notifyListeners(TabStateEventType.LABEL_CHANGED, tab);
@@ -492,14 +490,14 @@ export class TabStateManager {
    * 检查是否存在未保存的修改
    */
   hasUnsavedChanges(): boolean {
-    return this.tabs.some(t => t.isModified);
+    return this.tabs.some((t: TabModel) => t.isModified);
   }
 
   /**
    * 获取所有有未保存修改的标签页
    */
   getUnsavedTabs(): TabModel[] {
-    return this.tabs.filter(t => t.isModified);
+    return this.tabs.filter((t: TabModel) => t.isModified);
   }
 
   /**
