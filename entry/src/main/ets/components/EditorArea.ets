@@ -1392,10 +1392,6 @@ export struct EditorAreaImpl {
       if (cleanValue === this.lastHandledText) {
         return;
       }
-      if (cleanValue === this.editorText) {
-        this.lastHandledText = cleanValue;
-        return;
-      }
       const oldText = this.lastHandledText;
       if (cleanValue === oldText) {
         return;
@@ -2681,7 +2677,7 @@ export struct EditorAreaImpl {
         }.alignItems(VerticalAlign.Top).width('100%')
     }.scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring)
       .onScroll((xOffset: number, yOffset: number) => { this.onEditorScroll(xOffset, yOffset); })
-      .align(Alignment.TopStart).backgroundColor(this.col().bg).layoutWeight(1)
+      .align(Alignment.Top).backgroundColor(this.col().bg).layoutWeight(1)
 
     // Minimap (Bug5: 高度随代码行数动态变化; Bug2: 左对齐)
     if (this.showMinimap && this.editorText.length > 0) {
@@ -2703,7 +2699,7 @@ export struct EditorAreaImpl {
         .scrollBar(BarState.Off)
         .hitTestBehavior(HitTestMode.None)
         .focusable(false)
-        .align(Alignment.TopStart)
+        .align(Alignment.Top)
 
         Row()
           .width(EditorAreaImpl.MINIMAP_WIDTH)
