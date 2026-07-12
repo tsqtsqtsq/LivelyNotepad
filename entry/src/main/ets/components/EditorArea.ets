@@ -22,7 +22,7 @@ interface DiffRange {
   start: number;
   inserted: string;
   deleted: string;
-}
+  }
 
 /**
  * 折叠区域数据类。
@@ -106,6 +106,8 @@ export struct EditorAreaImpl {
   private wordHighlightPositions: number[] = [];
   private wordHighlightLen: number = 0;
   @State currentLineNum: number = 0;
+  @State selectionStart: number = 0;
+  @State selectionEnd: number = 0;
 
   private syncStats(): void {
     if (this.onContentChange) this.onContentChange(this.editorText);
@@ -124,7 +126,7 @@ export struct EditorAreaImpl {
   }
 
   private syncCurrentLineRange(): void {
-    const lines = this.editorText.split('\n');
+    const lines = this.getLines();
     let pos = 0;
     for (let li = 0; li < this.currentLineNum && li < lines.length; li++) {
       pos += lines[li].length + 1;
@@ -1272,7 +1274,7 @@ export struct EditorAreaImpl {
           }, 50);
         }, 0);
       }
-      this.displayText = this.escapePercent(this.editorText);
+      this.displayText = this.editorText;
       this.invalidateLines();
 
       // 更新当前行范围
@@ -1287,7 +1289,7 @@ export struct EditorAreaImpl {
           ? allLines[this.currentLineNum].length : 0);
 
       // 自动检测语言
-      if (this.language === 'plaintext' && cleanValue.length > 20) {
+      if (this.language === 'plaintext' && cleanValue.length > 8) {
         const d = this.detectLanguage();
         if (d !== 'plaintext' && this.onLanguageDetect) {
           this.onLanguageDetect(d);
@@ -1341,7 +1343,7 @@ export struct EditorAreaImpl {
           }, 50);
         }, 0);
       }
-      this.displayText = this.escapePercent(cleanValue);
+      this.displayText = cleanValue;
       this.invalidateLines();
 
       this.trackedCursor = changedPos;
@@ -1353,6 +1355,24 @@ export struct EditorAreaImpl {
       this.buildLineList();
       this.buildRenderTokens();
       this.scrollToCurrentLine();
+    }
+  }
+
+  private handleSelectionChange(selStart: number, selEnd: number): void {
+    this.selectionStart = selStart;
+    this.selectionEnd = selEnd;
+    this.trackedCursor = selEnd;
+    this.currentLineNum = this.lineFromPos(this.editorText, selEnd);
+    this.syncCurrentLineRange();
+    this.updateBracketMatching(this.editorText, selEnd);
+    this.updateWordHighlight();
+    this.buildRenderTokens();
+    if (selStart === selEnd) {
+      AppStorage.setOrCreate('selectionStats', '');
+    } else {
+      const selected = this.editorText.substring(selStart, selEnd);
+      const selLines = selected.split('\n').length;
+      AppStorage.setOrCreate('selectionStats', '已选: ' + selLines + ' 行 ' + selected.length + ' 字');
     }
   }
 
@@ -1410,7 +1430,7 @@ export struct EditorAreaImpl {
    */
   private detectLanguage(): string {
     const t = this.fullText;
-    if (t.length < 8) return 'plaintext';
+    if (t.length < 2) return 'plaintext';
     if (t.indexOf('@Component') >= 0 || t.indexOf('@Entry') >= 0 || t.indexOf('@Builder') >= 0) return 'arkts';
     if (t.indexOf('#include') >= 0) return 'cpp';
     if (t.indexOf('using namespace') >= 0) return 'cpp';
@@ -1450,9 +1470,9 @@ export struct EditorAreaImpl {
     // 每种括号类型的独立深度栈
     const depth: Map<string, number> = new Map();
     const full = this.fullText;
-    const openBrackets = new Set('{([<'.split(''));
-    const closeBrackets = new Set('})]>'.split(''));
-    const closeToOpen: Record<string, string> = { '}': '{', ']': '[', ')': '(', '>': '<' };
+    const openBrackets = new Set('{(['.split(''));
+    const closeBrackets = new Set('})]'.split(''));
+    const closeToOpen: Record<string, string> = { '}': '{', ']': '[', ')': '(' };
 
     for (let i = 0; i < full.length; i++) {
       const ch = full.charAt(i);
@@ -1657,7 +1677,8 @@ export struct EditorAreaImpl {
    * 若未找到则返回占位对象 (startLine = -1)。
    */
   private findFoldRegionAtLine(line: number): FoldRegion {
-    for (const r of this.foldRegions) {
+    for (let idx = this.foldRegions.length - 1; idx >= 0; idx--) {
+      const r = this.foldRegions[idx];
       if (line >= r.startLine && line <= r.endLine) {
         return r;
       }
@@ -1676,12 +1697,13 @@ export struct EditorAreaImpl {
     r.collapsed = !r.collapsed;
     this.flashedFoldLine = line;
     setTimeout(() => { this.flashedFoldLine = -1; }, 400);
+    const hiddenLines = r.endLine - r.startLine - 1;
     if (r.collapsed) {
-      this.activeFoldCount++;
+      this.activeFoldCount += hiddenLines;
       const lines = this.getLines();
       r.hiddenText = lines.slice(r.startLine + 1, r.endLine + 1).join('\n');
     } else {
-      this.activeFoldCount--;
+      this.activeFoldCount -= hiddenLines;
     }
     this.buildLineList();
     this.buildRenderTokens();
@@ -1696,7 +1718,7 @@ export struct EditorAreaImpl {
       return;
     }
     r.collapsed = true;
-    this.activeFoldCount++;
+    this.activeFoldCount += r.endLine - r.startLine - 1;
     const lines = this.getLines();
     r.hiddenText = lines.slice(r.startLine + 1, r.endLine + 1).join('\n');
     this.buildLineList();
@@ -1712,7 +1734,7 @@ export struct EditorAreaImpl {
       return;
     }
     r.collapsed = false;
-    this.activeFoldCount--;
+    this.activeFoldCount -= r.endLine - r.startLine - 1;
     this.buildLineList();
     this.buildRenderTokens();
   }
@@ -1830,7 +1852,11 @@ export struct EditorAreaImpl {
       return;
     }
     const line = lines[cur];
-    lines[cur] = line.startsWith('//') ? line.substring(2) : '//' + line;
+    let prefix = '//';
+    if (this.language === 'python' || this.language === 'shell' || this.language === 'yaml' || this.language === 'toml') {
+      prefix = '#';
+    }
+    lines[cur] = line.startsWith(prefix) ? line.substring(prefix.length) : prefix + line;
     const result = lines.join('\n');
     this.editorText = result;
     this.fullText = result;
@@ -1986,6 +2012,10 @@ export struct EditorAreaImpl {
    *   4. 透明（无背景）
    */
   mergeBg(si: number): string {
+    // 文本选中区域
+    if (this.selectionStart !== this.selectionEnd && si >= this.selectionStart && si < this.selectionEnd) {
+      return this.col().accentBg;
+    }
     // 当前搜索匹配项
     if (this.inCurMatch(si)) {
       return this.flashActive ? this.col().highlightFind : this.col().accentBg;
@@ -2049,14 +2079,7 @@ export struct EditorAreaImpl {
   /**
    * 转义 % → %%，防止 Span 组件将 % 解释为格式化占位符。
    */
-  private escapePercent(s: string): string {
-    let result = '';
-    for (let i = 0; i < s.length; i++) {
-      const ch = s.charAt(i);
-      result += ch === '%' ? '%%' : ch;
-    }
-    return result;
-  }
+
 
   /**
    * 折叠图标：▼ 展开 / ▶ 折叠 / 空格 无折叠。
@@ -2103,7 +2126,7 @@ export struct EditorAreaImpl {
     const clean = this.replaceCrlf(this.content);
     this.fullText = clean;
     this.editorText = clean;
-    this.displayText = this.escapePercent(clean);
+    this.displayText = clean;
     this.invalidateLines();
     this.guessIndentation(clean);
     this.lastLang = this.language;
@@ -2128,7 +2151,7 @@ export struct EditorAreaImpl {
     }
     this.fullText = clean;
     this.editorText = clean;
-    this.displayText = this.escapePercent(clean);
+    this.displayText = clean;
     this.invalidateLines();
     this.guessIndentation(clean);
     this.updateTokens();
@@ -2295,16 +2318,15 @@ export struct EditorAreaImpl {
                 .textAlign(TextAlign.Center).fontColor('#007acc').focusable(false)
                 .onClick(() => { this.toggleBookmarkAtLine(ind.lineNumber); })
             }
-          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4 })
+          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4 }).justifyContent(FlexAlign.Start)
 
-          // 行号（当前行高亮）
           Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
             Text((ind.lineNumber + 1).toString())
               .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
               .fontColor(ind.lineNumber === this.currentLineNum ? this.col().accent : this.col().textSecondary)
               .fontWeight(ind.lineNumber === this.currentLineNum ? FontWeight.Bold : FontWeight.Normal)
               .textAlign(TextAlign.End).width(40).focusable(false)
-          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).padding({ right: 8 })
+          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).padding({ right: 8 }).justifyContent(FlexAlign.Start)
         }
 
         Column() {
@@ -2313,12 +2335,12 @@ export struct EditorAreaImpl {
             if (this.tokens.length > 0) {
               Text() {
                 ForEach(this.renderTokens, (tok: TokenRender, i: number) => {
-                  Span(this.escapePercent(tok.text))
+                  Span(tok.text)
                     .fontColor(this.spanColor(tok.tokenType, tok.startIndex))
                     .backgroundColor(this.mergeBg(tok.startIndex))
                     .decoration({ type: this.matchDecoration(tok.startIndex),
                                    color: this.col().searchMark })
-                }, (tok: TokenRender, i: number) => i.toString())
+                }, (tok: TokenRender, i: number) => tok.startIndex.toString() + ':' + tok.endIndex.toString() + ':' + tok.text.length.toString())
               }
               .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
               .padding(4)
@@ -2340,6 +2362,9 @@ export struct EditorAreaImpl {
               .onKeyPreIme((event: KeyEvent): boolean => { return this.handleKeyPreIme(event); })
               .onKeyEvent((event: KeyEvent): boolean => { return this.handleKeyEvent(event); })
               .onChange((value: string) => { this.handleTextChange(value); })
+              .onTextSelectionChange((selectionStart: number, selectionEnd: number) => {
+                this.handleSelectionChange(selectionStart, selectionEnd);
+              })
               .onPaste((value: string, event: PasteEvent) => {
                 const text = value;
                 if (text && text.includes('\n') && this.trackedCursor >= 0) {

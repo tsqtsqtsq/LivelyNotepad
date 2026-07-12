@@ -149,7 +149,6 @@ struct Index {
   });
 
   aboutToAppear(): void {
-    AppStorage.setOrCreate('wordWrap', true);
     AppStorage.setOrCreate('fontSize', 16);
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;

@@ -74,7 +74,7 @@ KEYWORDS.set('c', new Set([
   'register', 'auto', 'if', 'else', 'for', 'while', 'do',
   'switch', 'case', 'break', 'continue', 'return', 'goto',
   'struct', 'union', 'enum', 'typedef', 'sizeof', 'NULL',
-  'true', 'false', 'include', 'define', 'ifdef', 'ifndef', 'endif'
+  'true', 'false', 'ifdef', 'ifndef', 'endif'
 ]));
 KEYWORDS.set('cpp', new Set([
   'int', 'long', 'double', 'float', 'char', 'short', 'void',
@@ -85,7 +85,7 @@ KEYWORDS.set('cpp', new Set([
   'new', 'delete', 'this', 'virtual', 'override', 'final',
   'public', 'private', 'protected', 'namespace', 'using',
   'template', 'typename', 'true', 'false', 'nullptr', 'throw',
-  'try', 'catch', 'include', 'define', 'constexpr', 'noexcept',
+  'try', 'catch', 'constexpr', 'noexcept',
   'explicit', 'mutable', 'friend', 'operator', 'inline'
 ]));
 KEYWORDS.set('go', new Set([
@@ -163,13 +163,39 @@ KEYWORDS.set('plaintext', new Set([]));
 /** 操作符集合 */
 const OPERATORS = new Set([
   '=', '==', '!=', '<', '>', '<=', '>=', '+', '-', '*', '/',
-  '%', '++', '--', '+=', '-=', '*=', '/=', '&&', '||', '!',
+  '%', '++', '--', '+=', '-=', '*=', '/=', '%=', '&&', '||', '!',
   '&', '|', '^', '~', '<<', '>>', '=>', '->', '::',
-  '??', '?.', '...'
+  '??', '?.', '...', '&=', '|=', '^=', '<<=', '>>='
 ]);
 
 export class Highlighter {
-  /** 将源代码拆分为着色 Token 数组 */
+  private static readonly PREPROC_LANGS: Set<ProgrammingLanguage> = new Set([
+    ProgrammingLanguage.CPP, ProgrammingLanguage.C, ProgrammingLanguage.CSHARP
+  ]);
+
+  private static readonly COMMENT_SLASH_LANGS: Set<ProgrammingLanguage> = new Set([
+    ProgrammingLanguage.JAVASCRIPT, ProgrammingLanguage.TYPESCRIPT,
+    ProgrammingLanguage.ARKTS, ProgrammingLanguage.CPP, ProgrammingLanguage.C,
+    ProgrammingLanguage.CSHARP, ProgrammingLanguage.GO, ProgrammingLanguage.RUST,
+    ProgrammingLanguage.SWIFT, ProgrammingLanguage.JAVA
+  ]);
+
+  private static readonly HASH_COMMENT_LANGS: Set<ProgrammingLanguage> = new Set([
+    ProgrammingLanguage.PYTHON, ProgrammingLanguage.SHELL, ProgrammingLanguage.YAML
+  ]);
+
+  private static isPreprocLang(lang: ProgrammingLanguage): boolean {
+    return Highlighter.PREPROC_LANGS.has(lang);
+  }
+
+  private static isSlashCommentLang(lang: ProgrammingLanguage): boolean {
+    return Highlighter.COMMENT_SLASH_LANGS.has(lang);
+  }
+
+  private static isHashCommentLang(lang: ProgrammingLanguage): boolean {
+    return Highlighter.HASH_COMMENT_LANGS.has(lang);
+  }
+
   static tokenize(text: string, lang: ProgrammingLanguage): Token[] {
     const tokens: Token[] = [];
     const kwSet = KEYWORDS.get(lang);
@@ -178,37 +204,24 @@ export class Highlighter {
 
     while (i < text.length) {
       // 预处理指令（C/C++/C#）: #include, #define, #ifdef 等
-      if ((lang === ProgrammingLanguage.CPP ||
-          lang === ProgrammingLanguage.C ||
-          lang === ProgrammingLanguage.CSHARP) &&
-          (i === 0 || text.charAt(i - 1) === '\n') &&
-          (text.charAt(i) === '#' || (text.charAt(i) === ' ' || text.charAt(i) === '\t') &&
-            i + 1 < text.length && text.charAt(i + 1) === '#')) {
-        // 跳过前导空白
-        let start = i;
-        while (start < text.length &&
-               (text.charAt(start) === ' ' ||
-                text.charAt(start) === '\t')) {
-          start++;
+      if (Highlighter.isPreprocLang(lang) &&
+          (i === 0 || text.charAt(i - 1) === '\n')) {
+        let probe = i;
+        while (probe < text.length &&
+               (text.charAt(probe) === ' ' || text.charAt(probe) === '\t')) {
+          probe++;
         }
-        let end = start + 1;
-        while (end < text.length && text.charAt(end) !== '\n') end++;
-        tokens.push({ text: text.substring(start, end), type: TokenType.PREPROCESSOR });
-        i = end;
-        continue;
+        if (probe < text.length && text.charAt(probe) === '#') {
+          let end = probe + 1;
+          while (end < text.length && text.charAt(end) !== '\n') end++;
+          tokens.push({ text: text.substring(probe, end), type: TokenType.PREPROCESSOR });
+          i = end;
+          continue;
+        }
       }
 
       // 单行注释 //
-      if ((lang === ProgrammingLanguage.JAVASCRIPT ||
-          lang === ProgrammingLanguage.TYPESCRIPT ||
-          lang === ProgrammingLanguage.ARKTS ||
-          lang === ProgrammingLanguage.CPP ||
-          lang === ProgrammingLanguage.C ||
-          lang === ProgrammingLanguage.CSHARP ||
-          lang === ProgrammingLanguage.GO ||
-          lang === ProgrammingLanguage.RUST ||
-          lang === ProgrammingLanguage.SWIFT ||
-          lang === ProgrammingLanguage.JAVA) &&
+      if (Highlighter.isSlashCommentLang(lang) &&
           i + 1 < text.length &&
           text.charAt(i) === '/' && text.charAt(i + 1) === '/') {
         let end = i + 2;
@@ -221,16 +234,7 @@ export class Highlighter {
       }
 
       // 多行注释 /* */
-      if ((lang === ProgrammingLanguage.JAVASCRIPT ||
-          lang === ProgrammingLanguage.TYPESCRIPT ||
-          lang === ProgrammingLanguage.ARKTS ||
-          lang === ProgrammingLanguage.CPP ||
-          lang === ProgrammingLanguage.C ||
-          lang === ProgrammingLanguage.CSHARP ||
-          lang === ProgrammingLanguage.GO ||
-          lang === ProgrammingLanguage.RUST ||
-          lang === ProgrammingLanguage.SWIFT ||
-          lang === ProgrammingLanguage.JAVA) &&
+      if (Highlighter.isSlashCommentLang(lang) &&
           i + 1 < text.length &&
           text.charAt(i) === '/' && text.charAt(i + 1) === '*') {
         let end = i + 2;
@@ -240,20 +244,17 @@ export class Highlighter {
           end++;
         }
         if (end < text.length - 1) {
-          end += 2; // 找到了 */
+          end += 2;
         } else {
-          end = text.length; // 未闭合注释，包含剩余全部
+          end = text.length;
         }
         tokens.push({ text: text.substring(i, end), type: TokenType.COMMENT });
         i = end;
         continue;
       }
 
-      // Python/SHELL # 注释
-      if ((lang === ProgrammingLanguage.PYTHON ||
-          lang === ProgrammingLanguage.SHELL ||
-          lang === ProgrammingLanguage.YAML) &&
-          text.charAt(i) === '#') {
+      // Python/SHELL/YAML # 注释
+      if (Highlighter.isHashCommentLang(lang) && text.charAt(i) === '#') {
         let end = i + 1;
         while (end < text.length && text.charAt(end) !== '\n') {
           end++;
@@ -274,9 +275,9 @@ export class Highlighter {
           end++;
         }
         if (end < text.length - 2) {
-          end += 3; // 找到了 -->
+          end += 3;
         } else {
-          end = text.length; // 未闭合注释，包含剩余全部
+          end = text.length;
         }
         tokens.push({ text: text.substring(i, end), type: TokenType.COMMENT });
         i = end;
@@ -318,23 +319,63 @@ export class Highlighter {
         continue;
       }
 
+      // ArkTS/TS 装饰器 @State @Prop @Entry @Component @Builder
+      if (text.charAt(i) === '@' &&
+          (lang === ProgrammingLanguage.ARKTS ||
+           lang === ProgrammingLanguage.TYPESCRIPT)) {
+        let end = i + 1;
+        while (end < text.length && Highlighter.isWordChar(text.charAt(end))) {
+          end++;
+        }
+        const word = text.substring(i, end);
+        if (keywords.has(word)) {
+          tokens.push({ text: word, type: TokenType.KEYWORD });
+        } else {
+          tokens.push({ text: word, type: TokenType.NORMAL });
+        }
+        i = end;
+        continue;
+      }
+
       // 数字
       if (text.charAt(i) >= '0' && text.charAt(i) <= '9') {
         let end = i;
-        while (end < text.length &&
-               ((text.charAt(end) >= '0' && text.charAt(end) <= '9') ||
-                text.charAt(end) === '.' || text.charAt(end) === 'x' ||
-                text.charAt(end) === 'X' || text.charAt(end) === 'f' ||
-                (text.charAt(end) >= 'a' && text.charAt(end) <= 'f') ||
-                (text.charAt(end) >= 'A' && text.charAt(end) <= 'F'))) {
-          end++;
+        if (end + 1 < text.length && text.charAt(end) === '0' &&
+            (text.charAt(end + 1) === 'x' || text.charAt(end + 1) === 'X')) {
+          end += 2;
+          while (end < text.length && Highlighter.isHexDigit(text.charAt(end))) {
+            end++;
+          }
+        } else {
+          while (end < text.length && text.charAt(end) >= '0' && text.charAt(end) <= '9') {
+            end++;
+          }
+          if (end < text.length && text.charAt(end) === '.') {
+            end++;
+            while (end < text.length && text.charAt(end) >= '0' && text.charAt(end) <= '9') {
+              end++;
+            }
+          }
+          if (end < text.length && (text.charAt(end) === 'e' || text.charAt(end) === 'E')) {
+            end++;
+            if (end < text.length && (text.charAt(end) === '+' || text.charAt(end) === '-')) {
+              end++;
+            }
+            while (end < text.length && text.charAt(end) >= '0' && text.charAt(end) <= '9') {
+              end++;
+            }
+          }
+          if (end < text.length && (text.charAt(end) === 'f' || text.charAt(end) === 'F' ||
+               text.charAt(end) === 'L' || text.charAt(end) === 'l')) {
+            end++;
+          }
         }
         tokens.push({ text: text.substring(i, end), type: TokenType.NUMBER });
         i = end;
         continue;
       }
 
-      // 单词（关键字或标识符）
+      // 单词（关键字或标识符，含数字）
       if (Highlighter.isWordChar(text.charAt(i))) {
         let end = i;
         while (end < text.length && Highlighter.isWordChar(text.charAt(end))) {
@@ -352,11 +393,11 @@ export class Highlighter {
         continue;
       }
 
-      // 操作符（含 1~3 字符：. .. ...）
+      // 操作符（1~3 字符，优先匹配长的）
       if (OPERATORS.has(text.charAt(i)) ||
           (i + 1 < text.length && OPERATORS.has(text.substring(i, i + 2)))) {
         const op3 = text.substring(i, i + 3);
-        if (i + 2 < text.length && op3 === '...') {
+        if (i + 2 < text.length && OPERATORS.has(op3)) {
           tokens.push({ text: op3, type: TokenType.OPERATOR });
           i += 3;
         } else {
@@ -383,7 +424,14 @@ export class Highlighter {
   private static isWordChar(ch: string): boolean {
     return (ch >= 'a' && ch <= 'z') ||
            (ch >= 'A' && ch <= 'Z') ||
+           (ch >= '0' && ch <= '9') ||
            ch === '_' || ch === '$';
+  }
+
+  private static isHexDigit(ch: string): boolean {
+    return (ch >= '0' && ch <= '9') ||
+           (ch >= 'a' && ch <= 'f') ||
+           (ch >= 'A' && ch <= 'F');
   }
 }
 

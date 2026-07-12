@@ -292,7 +292,7 @@ export struct EditorTabBarImpl {
 
   @Builder
   FileIconBuilder(language?: string) {
-    if (language === 'ets' || language === 'ts' || language === 'arkts') {
+    if (language === 'typescript' || language === 'ts' || language === 'arkts' || language === 'ets') {
       Text('TS')
         .fontSize(9)
         .fontColor('#3178C6')
@@ -302,7 +302,7 @@ export struct EditorTabBarImpl {
         .backgroundColor('#3178C620')
         .borderRadius(3)
         .margin({ right: 4 })
-    } else if (language === 'js') {
+    } else if (language === 'javascript' || language === 'js') {
       Text('JS')
         .fontSize(9)
         .fontColor('#F7DF1E')

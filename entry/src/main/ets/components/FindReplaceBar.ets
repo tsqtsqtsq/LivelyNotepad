@@ -13,7 +13,7 @@ import { ThemeColors } from '../utils/ThemeColors';
 @Component
 export struct FindReplaceBarImpl {
   @Prop @Watch('doSearch') editorText: string = '';
-  @StorageProp('currentColorMode') currentColorMode: string = 'dark';
+  @StorageProp('currentColorMode') currentColorMode: string = 'light';
   @State searchText: string = '';
   @State replaceText: string = '';
   @State caseSensitive: boolean = false;
