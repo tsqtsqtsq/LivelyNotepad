@@ -126,16 +126,14 @@ export struct EditorAreaImpl {
   }
 
   private syncCurrentLineRange(): void {
+    if (this.lineOffsetDirty) this.buildLineOffsetCache();
+    const pos = this.currentLineNum < this.lineOffsetCache.length
+      ? this.lineOffsetCache[this.currentLineNum] : 0;
     const lines = this.getLines();
-    let pos = 0;
-    for (let li = 0; li < this.currentLineNum && li < lines.length; li++) {
-      pos += lines[li].length + 1;
-    }
     this.currentLineStart = pos;
     this.currentLineEnd = pos +
       (this.currentLineNum < lines.length ? lines[this.currentLineNum].length : 0);
     this.syncCursorStats();
-    this.buildRenderTokens();
   }
 
   private updateSelectionStats(oldText: string, newText: string): void {
@@ -169,6 +167,15 @@ export struct EditorAreaImpl {
     if (totalH > 0 && viewH > 0) {
       this.minimapScrollRatio = Math.min(1, yOffset / Math.max(1, totalH - viewH));
     }
+    this.lastScrollY = yOffset;
+    const minimapTotalH = this.getLines().length * 2;
+    if (minimapTotalH > 0) {
+      this.minimapScroller.scrollTo({
+        xOffset: 0,
+        yOffset: this.minimapScrollRatio * minimapTotalH,
+        animation: false
+      });
+    }
   }
 
   private minimapSliderHeight(): number {
@@ -183,6 +190,35 @@ export struct EditorAreaImpl {
     if (total <= 1) return 0;
     const sliderH = this.minimapSliderHeight();
     return this.minimapScrollRatio * (100 - sliderH);
+  }
+
+  private minimapLineWidth(line: string): number {
+    const visible = line.trimStart();
+    return Math.max(visible.length, 1) * 0.8;
+  }
+
+  private minimapLineIndent(line: string): number {
+    return this.getLineIndent(line) * 0.5;
+  }
+
+  private minimapLineColor(lineIdx: number): string {
+    if (lineIdx === this.currentLineNum) {
+      return this.col().accent;
+    }
+    const lines = this.getLines();
+    if (lineIdx >= lines.length) return this.col().textSecondary;
+    const line = lines[lineIdx];
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('//') || trimmed.startsWith('#')) {
+      return this.currentColorMode === 'light' ? '#8C8C8C' : '#808080';
+    }
+    if (trimmed.startsWith('/*') || trimmed.startsWith('*')) {
+      return this.currentColorMode === 'light' ? '#8C8C8C' : '#808080';
+    }
+    if (trimmed.includes('"') || trimmed.includes("'")) {
+      return this.currentColorMode === 'light' ? '#067D17' : '#6A8759';
+    }
+    return this.col().textSecondary;
   }
 
   @State showCommandPalette: boolean = false;
@@ -452,6 +488,31 @@ export struct EditorAreaImpl {
   private bookmarkedLines: Set<number> = new Set();
   private cachedLines: string[] = [];
   private linesDirty: boolean = true;
+  private wrappedLineCounts: number[] = [];
+  private computeWrappedLines(): void {
+    const lines = this.getLines();
+    this.wrappedLineCounts = [];
+    if (!this.wordWrap || this.editorAreaWidth <= 0) {
+      for (let i = 0; i < lines.length; i++) {
+        this.wrappedLineCounts.push(1);
+      }
+      return;
+    }
+    const charWidth = this.fontSize * 0.6;
+    const available = Math.max(1, this.editorAreaWidth - 8 - 40);
+    for (let i = 0; i < lines.length; i++) {
+      const lineChars = lines[i].length;
+      const wrapped = Math.max(1, Math.ceil(lineChars * charWidth / available));
+      this.wrappedLineCounts.push(wrapped);
+    }
+  }
+  @State private editorAreaWidth: number = 0;
+  private textMaxWidth(): Length {
+    if (this.wordWrap) {
+      return '100%';
+    }
+    return 100000;
+  }
   private useTabs: boolean = false;
   private indentSize: number = 4;
 
@@ -627,7 +688,31 @@ export struct EditorAreaImpl {
     }
     return this.cachedLines;
   }
-  private invalidateLines(): void { this.linesDirty = true; }
+  private lineOffsetCache: number[] = [];
+  private lineOffsetDirty: boolean = true;
+  private buildLineOffsetCache(): void {
+    const lines = this.getLines();
+    this.lineOffsetCache = [0];
+    for (let i = 0; i < lines.length; i++) {
+      this.lineOffsetCache.push(this.lineOffsetCache[i] + lines[i].length + 1);
+    }
+    this.lineOffsetDirty = false;
+  }
+  private lineFromPosFast(pos: number): number {
+    if (this.lineOffsetDirty) this.buildLineOffsetCache();
+    let lo = 0;
+    let hi = this.lineOffsetCache.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.lineOffsetCache[mid] <= pos) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return lo;
+  }
+  private invalidateLines(): void { this.linesDirty = true; this.lineOffsetDirty = true; }
   private lineH(): number { return this.fontSize * 1.5; }
 
   // ================================================================
@@ -923,10 +1008,14 @@ export struct EditorAreaImpl {
 
   // ---------- 闭合括号去重（IME 兼容） ----------
 
-  private fixCloseDuplicates(text: string): string {
+  private fixCloseDuplicates(text: string, oldText: string): string {
     const cs = ')}]';
     for (let i = 0; i < text.length - 1; i++) {
       if (cs.indexOf(text.charAt(i)) >= 0 && text.charAt(i + 1) === text.charAt(i)) {
+        const beforeInOld = i < oldText.length ? oldText.charAt(i) : '';
+        if (beforeInOld === text.charAt(i)) {
+          continue;
+        }
         this.autoIndentCaret = i + 1;
         return text.substring(0, i) + text.substring(i + 1);
       }
@@ -1071,8 +1160,18 @@ export struct EditorAreaImpl {
     const ac = newText.substring(i + 1);
 
     // 行尾是 { → 增加缩进，补 }，光标放在中间
+    // 但如果 { 后面同一行已有 }（如 int main(){}），则只缩进不补 }
     if (trimmed.endsWith('{')) {
+      const braceIdx = trimmed.indexOf('{');
+      const afterBrace = trimmed.substring(braceIdx + 1);
+      const hasCloseOnSameLine = afterBrace.includes('}');
       const extra = this.getIndentStr();
+      if (hasCloseOnSameLine) {
+        // 同行已有 } → 只缩进，不补 }
+        this.autoIndentCaret = i + 1 + indent.length + extra.length;
+        return newText.substring(0, i + 1) +
+          indent + extra + newText.substring(i + 1);
+      }
       const cb = '\n' + indent + '}';
       if (ac.length > 0 && ac.charAt(0) === '}') {
         this.autoIndentCaret = i + 1 + indent.length + extra.length;
@@ -1228,7 +1327,7 @@ export struct EditorAreaImpl {
     this.updateSelectionStats(oldText, cleanValue);
 
     if (cleanValue.length > oldText.length) {
-      cleanValue = this.fixCloseDuplicates(cleanValue);
+      cleanValue = this.fixCloseDuplicates(cleanValue, oldText);
       if (cleanValue === oldText) {
         this.lastHandledText = cleanValue;
         this.textChanging = false;
@@ -1255,7 +1354,7 @@ export struct EditorAreaImpl {
       }
       this.trackedCursor = changedPos;
 
-      this.currentLineNum = this.lineFromPos(cleanValue, changedPos);
+      this.currentLineNum = this.lineFromPosFast(changedPos);
       this.updateBracketMatching(cleanValue, changedPos);
       this.updateWordHighlight();
 
@@ -1270,26 +1369,19 @@ export struct EditorAreaImpl {
         this.textAreaController.caretPosition(changedPos);
         setTimeout(() => {
           this.textAreaController.caretPosition(changedPos);
-          setTimeout(() => {
-            this.textAreaController.caretPosition(changedPos);
-          }, 50);
-        }, 0);
+        }, 20);
       }
       this.displayText = this.editorText;
       this.invalidateLines();
 
-      // 更新当前行范围
-      const allLines = this.getLines();
-      let linePos = 0;
-      for (let li = 0; li < this.currentLineNum && li < allLines.length; li++) {
-        linePos += allLines[li].length + 1;
-      }
-      this.currentLineStart = linePos;
-      this.currentLineEnd = linePos +
-        (this.currentLineNum < allLines.length
-          ? allLines[this.currentLineNum].length : 0);
+      if (this.lineOffsetDirty) this.buildLineOffsetCache();
+      const clp = this.currentLineNum < this.lineOffsetCache.length
+        ? this.lineOffsetCache[this.currentLineNum] : 0;
+      this.currentLineStart = clp;
+      this.currentLineEnd = clp +
+        (this.currentLineNum < this.cachedLines.length
+          ? this.cachedLines[this.currentLineNum].length : 0);
 
-      // 自动检测语言
       if (this.language === 'plaintext' && cleanValue.length > 8) {
         const d = this.detectLanguage();
         if (d !== 'plaintext' && this.onLanguageDetect) {
@@ -1299,7 +1391,6 @@ export struct EditorAreaImpl {
 
       this.updateTokens();
       this.buildLineList();
-      this.buildRenderTokens();
       this.scrollToCurrentLine();
       if (this.onCursorMove) {
         const ln = this.currentLineNum + 1;
@@ -1338,22 +1429,25 @@ export struct EditorAreaImpl {
         this.textAreaController.caretPosition(changedPos);
         setTimeout(() => {
           this.textAreaController.caretPosition(changedPos);
-          setTimeout(() => {
-            this.textAreaController.caretPosition(changedPos);
-          }, 50);
-        }, 0);
+        }, 20);
       }
       this.displayText = cleanValue;
       this.invalidateLines();
 
       this.trackedCursor = changedPos;
-      this.currentLineNum = this.lineFromPos(cleanValue, changedPos);
+      this.currentLineNum = this.lineFromPosFast(changedPos);
       this.updateBracketMatching(cleanValue, changedPos);
-      this.updateWordHighlight();
+
+      if (this.lineOffsetDirty) this.buildLineOffsetCache();
+      const clp2 = this.currentLineNum < this.lineOffsetCache.length
+        ? this.lineOffsetCache[this.currentLineNum] : 0;
+      this.currentLineStart = clp2;
+      this.currentLineEnd = clp2 +
+        (this.currentLineNum < this.cachedLines.length
+          ? this.cachedLines[this.currentLineNum].length : 0);
 
       this.updateTokens();
       this.buildLineList();
-      this.buildRenderTokens();
       this.scrollToCurrentLine();
     }
     this.lastHandledText = this.editorText;
@@ -1364,14 +1458,15 @@ export struct EditorAreaImpl {
     this.selectionStart = selStart;
     this.selectionEnd = selEnd;
     this.trackedCursor = selEnd;
-    this.currentLineNum = this.lineFromPos(this.editorText, selEnd);
+    this.currentLineNum = this.lineFromPosFast(selEnd);
     this.syncCurrentLineRange();
     this.updateBracketMatching(this.editorText, selEnd);
-    this.updateWordHighlight();
-    this.buildRenderTokens();
     if (selStart === selEnd) {
+      this.updateWordHighlight();
       AppStorage.setOrCreate('selectionStats', '');
     } else {
+      this.wordHighlightPositions = [];
+      this.wordHighlightLen = 0;
       const selected = this.editorText.substring(selStart, selEnd);
       const selLines = selected.split('\n').length;
       AppStorage.setOrCreate('selectionStats', '已选: ' + selLines + ' 行 ' + selected.length + ' 字');
@@ -1587,15 +1682,14 @@ export struct EditorAreaImpl {
   private buildLineList(): void {
     const lines = this.getLines();
     this.findAllFoldRegions();
+    this.computeWrappedLines();
 
-    // 如果 foldAll 激活，新出现的代码块也自动折叠（同时检测 prop 和 storage）
     if (this.foldAll || this.storeFoldAll) {
       for (const r of this.foldRegions) {
         r.collapsed = true;
       }
     }
 
-    // 收集所有被折叠隐藏的行
     const cs = new Set<number>();
     for (const r of this.foldRegions) {
       if (r.collapsed) {
@@ -1607,8 +1701,9 @@ export struct EditorAreaImpl {
     this.activeFoldCount = cs.size;
     const parts: string[] = [];
     const inds: FoldLineIndicator[] = [];
+    let totalVisualLines = 0;
     for (let i = 0; i < lines.length; i++) {
-      // 所有行都显示，保证行号与 TextArea 对齐；折叠行仅加折叠标记
+      const wrappedCount = this.wrappedLineCounts.length > i ? this.wrappedLineCounts[i] : 1;
       parts.push((i + 1).toString());
       const ind: FoldLineIndicator = {
         lineNumber: i,
@@ -1627,10 +1722,25 @@ export struct EditorAreaImpl {
         ind.isFoldEnd = true;
       }
       inds.push(ind);
+      totalVisualLines += wrappedCount;
+      // For wrapped lines, add empty indicators to align with visual rows
+      for (let w = 1; w < wrappedCount; w++) {
+        const wrapInd: FoldLineIndicator = {
+          lineNumber: -1 - i,
+          isFoldStart: false,
+          isFoldEnd: false,
+          isCollapsed: false,
+          isHidden: true,
+          indentLevel: 0
+        };
+        inds.push(wrapInd);
+        parts.push('');
+        totalVisualLines++;
+      }
     }
     this.foldIndicators = inds;
     this.lineNumberText = parts.join('\n');
-    this.visibleLineCount = parts.length > 0 ? parts.length : 1;
+    this.visibleLineCount = totalVisualLines > 0 ? totalVisualLines : 1;
   }
 
   // ================================================================
@@ -2143,16 +2253,18 @@ export struct EditorAreaImpl {
     this.updateTokens();
     this.buildLineList();
     this.syncStats();
+    setTimeout(() => {
+      this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+      this.lastScrollY = 0;
+      this.minimapScrollRatio = 0;
+    }, 50);
   }
-
-  /**
-   * 外部内容变更时同步（如文件切换）。
-   */
   syncFromExternal(): void {
     const clean = this.replaceCrlf(this.content);
     if (clean === this.editorText) {
       return;
     }
+    const savedScrollY = this.lastScrollY;
     this.fullText = clean;
     this.editorText = clean;
     this.displayText = clean;
@@ -2162,9 +2274,18 @@ export struct EditorAreaImpl {
     this.updateTokens();
     this.buildLineList();
     this.syncStats();
-    this.lastScrollY = 0;
-    this.minimapScrollRatio = 0;
-    this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+    if (savedScrollY > 0) {
+      setTimeout(() => {
+        this.editorScroller.scrollTo({ xOffset: 0, yOffset: savedScrollY, animation: false });
+        this.lastScrollY = savedScrollY;
+      }, 50);
+    } else {
+      this.lastScrollY = 0;
+      this.minimapScrollRatio = 0;
+      setTimeout(() => {
+        this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+      }, 50);
+    }
   }
 
   /**
@@ -2314,28 +2435,26 @@ export struct EditorAreaImpl {
         if (this.showLineNumbers) {
           Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
             Row() {
-              Text(this.foldIcon(ind))
+              Text(ind.lineNumber >= 0 ? this.foldIcon(ind) : ' ')
                 .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH()).width(16)
                 .textAlign(TextAlign.Center)
-                .fontColor(ind.lineNumber === this.flashedFoldLine ? this.col().accent : this.col().textSecondary)
+                .fontColor(ind.lineNumber >= 0 && ind.lineNumber === this.flashedFoldLine ? this.col().accent : this.col().textSecondary)
                 .focusable(false)
-                .onClick(() => { this.toggleFold(ind.lineNumber); })
-              Text(this.hasBookmark(ind.lineNumber) ? '●' : ' ')
+                .onClick(() => { if (ind.lineNumber >= 0) this.toggleFold(ind.lineNumber); })
+              Text(ind.lineNumber >= 0 && this.hasBookmark(ind.lineNumber) ? '●' : ' ')
                 .fontSize(this.fontSize * 0.6).fontFamily('monospace').lineHeight(this.lineH()).width(12)
                 .textAlign(TextAlign.Center).fontColor('#007acc').focusable(false)
-                .onClick(() => { this.toggleBookmarkAtLine(ind.lineNumber); })
+                .onClick(() => { if (ind.lineNumber >= 0) this.toggleBookmarkAtLine(ind.lineNumber); })
             }
-          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4 }).justifyContent(FlexAlign.Start)
+          }, (ind: FoldLineIndicator, idx: number) => (ind.lineNumber >= 0 ? ind.lineNumber.toString() : 'w' + idx.toString())) }.padding({ top: 4 }).justifyContent(FlexAlign.Start)
 
-          if (!this.wordWrap) {
-            Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
-              Text((ind.lineNumber + 1).toString())
-                .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
-                .fontColor(ind.lineNumber === this.currentLineNum ? this.col().accent : this.col().textSecondary)
-                .fontWeight(ind.lineNumber === this.currentLineNum ? FontWeight.Bold : FontWeight.Normal)
-                .textAlign(TextAlign.End).width(40).focusable(false)
-            }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).justifyContent(FlexAlign.Start)
-          }
+          Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
+            Text(ind.lineNumber >= 0 ? (ind.lineNumber + 1).toString() : '')
+              .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
+              .fontColor(ind.lineNumber >= 0 && ind.lineNumber === this.currentLineNum ? this.col().accent : this.col().textSecondary)
+              .fontWeight(ind.lineNumber >= 0 && ind.lineNumber === this.currentLineNum ? FontWeight.Bold : FontWeight.Normal)
+              .textAlign(TextAlign.End).width(40).focusable(false)
+          }, (ind: FoldLineIndicator, idx: number) => (ind.lineNumber >= 0 ? ind.lineNumber.toString() : 'wn' + idx.toString())) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).justifyContent(FlexAlign.Start)
         }
 
         Column() {
@@ -2353,12 +2472,13 @@ export struct EditorAreaImpl {
               }
               .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
               .padding(4)
+              .width(this.textMaxWidth())
               .hitTestBehavior(HitTestMode.None).focusable(false)
             }
             if (this.tokens.length === 0) {
               Text(this.editorText)
                 .fontSize(this.fontSize).fontColor(this.col().text).fontFamily('monospace')
-                .lineHeight(this.lineH()).padding(4).width('100%').textAlign(TextAlign.Start)
+                .lineHeight(this.lineH()).padding(4).width(this.textMaxWidth()).textAlign(TextAlign.Start)
                 .hitTestBehavior(HitTestMode.None).focusable(false)
             }
             // 输入层（上层透明，接收所有触摸和焦点）
@@ -2377,7 +2497,6 @@ export struct EditorAreaImpl {
               .onPaste((value: string, event: PasteEvent) => {
                 const text = value;
                 if (text && text.includes('\n') && this.trackedCursor >= 0) {
-                  // 粘贴多行文本 → 自动调整缩进
                   setTimeout(() => {
                     this.autoIndentPaste();
                   }, 50);
@@ -2385,6 +2504,16 @@ export struct EditorAreaImpl {
               })
           }
         }.layoutWeight(1).padding({ left: 4, right: 4, bottom: 4 })
+          .onAreaChange((_oldArea: Area, newArea: Area) => {
+            const w = Number(newArea.width);
+            if (w !== this.editorAreaWidth) {
+              this.editorAreaWidth = w;
+              if (this.wordWrap) {
+                this.computeWrappedLines();
+                this.buildLineList();
+              }
+            }
+          })
         }.alignItems(VerticalAlign.Top)
     }.scrollBar(BarState.Auto).edgeEffect(EdgeEffect.Spring)
       .onScroll((xOffset: number, yOffset: number) => { this.onEditorScroll(xOffset, yOffset); })
@@ -2397,11 +2526,11 @@ export struct EditorAreaImpl {
           Column() {
             ForEach(this.getLines(), (line: string, idx: number) => {
               Row()
-                .width(Math.min(56, Math.max(4, line.length * 0.8)))
-                .height(1)
-                .backgroundColor(this.col().textSecondary)
-                .opacity(0.3)
-                .margin({ left: this.getLineIndent(line) * 0.5 })
+                .width(Math.min(56, Math.max(4, this.minimapLineWidth(line))))
+                .height(2)
+                .backgroundColor(this.minimapLineColor(idx))
+                .opacity(0.5)
+                .margin({ left: this.minimapLineIndent(line) })
             }, (line: string, idx: number) => idx.toString())
           }
           .width(60)
@@ -2415,7 +2544,7 @@ export struct EditorAreaImpl {
           .width(60)
           .height(this.minimapSliderHeight())
           .backgroundColor(this.col().accent)
-          .opacity(0.15)
+          .opacity(0.2)
           .offset({ y: this.minimapSliderOffset() })
           .hitTestBehavior(HitTestMode.None)
       }
