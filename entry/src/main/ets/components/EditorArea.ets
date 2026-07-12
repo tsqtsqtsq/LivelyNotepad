@@ -113,7 +113,7 @@ export struct EditorAreaImpl {
   @State selectionEnd: number = 0;
 
   private syncStats(): void {
-    if (this.onContentChange) this.onContentChange(this.editorText);
+    if (this.onContentChange) this.onContentChange(this.fullText);
   }
   private syncCursorStats(): void {
     if (this.onCursorMove) {
@@ -498,6 +498,7 @@ export struct EditorAreaImpl {
     this.trackedCursor = cursorPos;
     this.invalidateLines();
     this.beginRefresh();
+    if (this.onContentChange) this.onContentChange(newText);
     this.textAreaController.caretPosition(cursorPos);
     return true;
   }
@@ -567,6 +568,7 @@ export struct EditorAreaImpl {
   }
 
   private autoIndentCaret: number = -1;
+  private pendingPasteIndent: boolean = false;
   private lastLang: string = 'plaintext';
   private bracketChars: string = '{}[]()<>';
   private bracketLevels: Map<number, number> = new Map();
@@ -1345,28 +1347,22 @@ export struct EditorAreaImpl {
     return result;
   }
 
-  /**
-   * 粘贴多行文本后自动调整缩进。
-   * 保留粘贴内容的相对缩进，只调整第一行的基础缩进以匹配当前上下文。
-   */
-  private autoIndentPaste(): void {
-    const lines = this.editorText.split('\n');
-    if (lines.length < 2) return;
-    // 获取当前行的缩进
+  private tryAutoIndentPaste(text: string, changedPos: number): string {
+    const lines = text.split('\n');
+    if (lines.length < 2) return text;
     const curLine = this.currentLineNum;
-    if (curLine <= 0 || curLine >= lines.length) return;
+    if (curLine <= 0 || curLine >= lines.length) return text;
     const curIndent = this.getLeadingWs(lines[curLine]);
-    // 从当前位置往后查找粘贴的第一行（非空行）
     let pasteStart = curLine;
     while (pasteStart < lines.length && lines[pasteStart].length === 0) pasteStart++;
-    if (pasteStart >= lines.length) return;
+    if (pasteStart >= lines.length) return text;
     const pasteIndent = this.getLeadingWs(lines[pasteStart]);
-    // 如果缩进相同或粘贴行没缩进，不处理
-    if (curIndent.length === pasteIndent.length) return;
-    // 如果粘贴行的缩进是当前行缩进的前缀，不处理（可能是正确的）
-    if (pasteIndent.startsWith(curIndent)) return;
-    // 调整：把粘贴行的缩进替换为当前上下文的缩进
-    const newLines = lines.slice();
+    if (curIndent.length === pasteIndent.length) return text;
+    if (pasteIndent.startsWith(curIndent)) return text;
+    const newLines: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      newLines.push(lines[i]);
+    }
     for (let i = pasteStart; i < lines.length; i++) {
       if (lines[i].length === 0) continue;
       const ws = this.getLeadingWs(lines[i]);
@@ -1374,18 +1370,7 @@ export struct EditorAreaImpl {
         newLines[i] = curIndent + lines[i].substring(pasteIndent.length);
       }
     }
-    const newText = newLines.join('\n');
-    if (newText !== this.editorText) {
-      const cursor = this.trackedCursor;
-      this.editorText = newText;
-      this.fullText = newText;
-      this.displayText = newText;
-      this.lastHandledText = newText;
-      this.invalidateLines();
-      this.beginRefresh();
-      this.syncStats();
-      setTimeout(() => { this.textAreaController.caretPosition(cursor); }, 0);
-    }
+    return newLines.join('\n');
   }
 
   // ==================== CORE: handleTextChange ====================
@@ -1457,12 +1442,21 @@ export struct EditorAreaImpl {
         this.updateBracketMatching(cleanValue, changedPos);
         this.updateWordHighlight();
 
+        if (this.pendingPasteIndent) {
+          this.pendingPasteIndent = false;
+          const indentResult = this.tryAutoIndentPaste(cleanValue, changedPos);
+          if (indentResult !== cleanValue) {
+            cleanValue = indentResult;
+          }
+        }
+
         if (this.activeFoldCount === 0) {
           this.editorText = cleanValue;
           this.fullText = cleanValue;
           this.syncStats();
         } else {
           this.applyVisibleChange(cleanValue);
+          this.syncStats();
         }
         if (cursorExplicit) {
           this.textAreaController.caretPosition(changedPos);
@@ -1520,21 +1514,28 @@ export struct EditorAreaImpl {
           }
         }
 
-        this.editorText = cleanValue;
-        this.fullText = cleanValue;
-        this.syncStats();
+        this.trackedCursor = changedPos;
+        this.currentLineNum = this.lineFromPosFast(changedPos);
+        this.updateBracketMatching(cleanValue, changedPos);
+        this.updateWordHighlight();
+
+        if (this.activeFoldCount === 0) {
+          this.editorText = cleanValue;
+          this.fullText = cleanValue;
+          this.syncStats();
+        } else {
+          this.applyVisibleChange(cleanValue);
+          this.syncStats();
+        }
+
         if (cursorExplicit) {
           this.textAreaController.caretPosition(changedPos);
           setTimeout(() => {
             this.textAreaController.caretPosition(changedPos);
           }, 20);
         }
-        this.displayText = cleanValue;
+        this.displayText = this.editorText;
         this.invalidateLines();
-
-        this.trackedCursor = changedPos;
-        this.currentLineNum = this.lineFromPosFast(changedPos);
-        this.updateBracketMatching(cleanValue, changedPos);
 
         if (this.lineOffsetDirty) this.buildLineOffsetCache();
         const clp2 = this.currentLineNum < this.lineOffsetCache.length
@@ -1543,6 +1544,18 @@ export struct EditorAreaImpl {
         this.currentLineEnd = clp2 +
           (this.currentLineNum < this.cachedLines.length
             ? this.cachedLines[this.currentLineNum].length : 0);
+
+        if (this.onCursorMove) {
+          const ln = this.currentLineNum + 1;
+          let col = 1;
+          for (let j = changedPos - 1; j >= 0; j--) {
+            if (cleanValue.charAt(j) === '\n') {
+              break;
+            }
+            col++;
+          }
+          this.onCursorMove(ln, col);
+        }
 
         this.beginRefresh();
         this.scrollToCurrentLine();
@@ -1822,7 +1835,6 @@ export struct EditorAreaImpl {
    */
   private buildLineList(): void {
     const lines = this.getLines();
-    this.findAllFoldRegions();
     this.computeWrappedLines();
     this.computeMaxLineLen();
 
@@ -2424,6 +2436,10 @@ export struct EditorAreaImpl {
     if (clean === this.editorText && clean === this.lastHandledText) {
       return;
     }
+    if (this.activeFoldCount > 0 && clean === this.fullText) {
+      this.lastHandledText = clean;
+      return;
+    }
     this.fullText = clean;
     this.editorText = clean;
     this.displayText = clean;
@@ -2645,13 +2661,8 @@ export struct EditorAreaImpl {
               .onTextSelectionChange((selectionStart: number, selectionEnd: number) => {
                 this.handleSelectionChange(selectionStart, selectionEnd);
               })
-              .onPaste((value: string, event: PasteEvent) => {
-                const text = value;
-                if (text && text.includes('\n') && this.trackedCursor >= 0) {
-                  setTimeout(() => {
-                    this.autoIndentPaste();
-                  }, 50);
-                }
+              .onPaste(() => {
+                this.pendingPasteIndent = true;
               })
           }
         }.layoutWeight(1).padding({ left: 4, right: 4, bottom: 4 })
