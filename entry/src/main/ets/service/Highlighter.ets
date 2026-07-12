@@ -102,7 +102,7 @@ KEYWORDS.set('rust', new Set([
   'for', 'while', 'loop', 'in', 'return', 'break', 'continue',
   'struct', 'enum', 'trait', 'impl', 'pub', 'use', 'mod', 'crate',
   'self', 'super', 'where', 'as', 'ref', 'move', 'async', 'await',
-  'unsafe', 'dyn', 'true', 'false', 'type', 'fn', 'macro_rules'
+  'unsafe', 'dyn', 'true', 'false', 'type', 'macro_rules'
 ]));
 KEYWORDS.set('sql', new Set([
   'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE',
@@ -357,12 +357,17 @@ export class Highlighter {
             }
           }
           if (end < text.length && (text.charAt(end) === 'e' || text.charAt(end) === 'E')) {
+            const beforeE = end;
             end++;
             if (end < text.length && (text.charAt(end) === '+' || text.charAt(end) === '-')) {
               end++;
             }
+            const afterSign = end;
             while (end < text.length && text.charAt(end) >= '0' && text.charAt(end) <= '9') {
               end++;
+            }
+            if (end === afterSign) {
+              end = beforeE;
             }
           }
           if (end < text.length && (text.charAt(end) === 'f' || text.charAt(end) === 'F' ||
@@ -394,21 +399,19 @@ export class Highlighter {
       }
 
       // 操作符（1~3 字符，优先匹配长的）
-      if (OPERATORS.has(text.charAt(i)) ||
-          (i + 1 < text.length && OPERATORS.has(text.substring(i, i + 2)))) {
-        const op3 = text.substring(i, i + 3);
-        if (i + 2 < text.length && OPERATORS.has(op3)) {
+      const op1 = text.charAt(i);
+      const op2 = i + 1 < text.length ? text.substring(i, i + 2) : '';
+      const op3 = i + 2 < text.length ? text.substring(i, i + 3) : '';
+      if (OPERATORS.has(op1) || (op2.length > 0 && OPERATORS.has(op2)) || (op3.length > 0 && OPERATORS.has(op3))) {
+        if (op3.length > 0 && OPERATORS.has(op3)) {
           tokens.push({ text: op3, type: TokenType.OPERATOR });
           i += 3;
+        } else if (op2.length > 0 && OPERATORS.has(op2)) {
+          tokens.push({ text: op2, type: TokenType.OPERATOR });
+          i += 2;
         } else {
-          const op2 = text.substring(i, i + 2);
-          if (OPERATORS.has(op2)) {
-            tokens.push({ text: op2, type: TokenType.OPERATOR });
-            i += 2;
-          } else {
-            tokens.push({ text: text.charAt(i), type: TokenType.OPERATOR });
-            i++;
-          }
+          tokens.push({ text: text.charAt(i), type: TokenType.OPERATOR });
+          i++;
         }
         continue;
       }

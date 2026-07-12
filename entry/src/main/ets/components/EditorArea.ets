@@ -1,6 +1,42 @@
 import { Highlighter, Token, TokenType } from '../service/Highlighter';
 import { ProgrammingLanguage } from '../model/TabModel';
 import { ThemeColors } from '../utils/ThemeColors';
+import { CommandItem, SymbolItem, COMMANDS, SNIPPETS_CPP, SNIPPETS_PYTHON, SNIPPETS_ARKTS, MINIMAP_KW, BRACKET_COLORS, WORD_SEP_CHARS }
+  from '../model/EditorConstants';
+import { ShortcutsPanel } from './ShortcutsPanel';
+
+class MinimapDataSource implements IDataSource {
+  private lines: string[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  totalCount(): number {
+    return this.lines.length;
+  }
+
+  getData(index: number): string {
+    return this.lines[index] !== undefined ? this.lines[index] : '';
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (this.listeners.indexOf(listener) < 0) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const pos = this.listeners.indexOf(listener);
+    if (pos >= 0) {
+      this.listeners.splice(pos, 1);
+    }
+  }
+
+  setLines(newLines: string[]): void {
+    this.lines = newLines;
+    for (let i = 0; i < this.listeners.length; i++) {
+      this.listeners[i].onDataReloaded();
+    }
+  }
+}
 
 interface TokenRender {
   text: string;
@@ -44,28 +80,6 @@ class FoldRegion {
   }
 }
 
-class CommandItem {
-  label: string;
-  desc: string;
-  key: string;
-  constructor(label: string, desc: string, key: string) {
-    this.label = label;
-    this.desc = desc;
-    this.key = key;
-  }
-}
-
-class SymbolItem {
-  label: string;
-  line: number;
-  kind: string;
-  constructor(label: string, line: number, kind: string) {
-    this.label = label;
-    this.line = line;
-    this.kind = kind;
-  }
-}
-
 @Component
 export struct EditorAreaImpl {
   @Prop @Watch('syncFromExternal') content: string = '';
@@ -74,6 +88,7 @@ export struct EditorAreaImpl {
   @Prop searchMatches: number[] = [];
   @Prop currentSearchIdx: number = -1;
   @Prop searchLen: number = 0;
+  @Prop matchLengths: number[] = [];
   @Prop @Watch('onFoldAllChange') foldAll: boolean = false;
   @StorageProp('foldAll') storeFoldAll: boolean = false;
   @Prop isModified: boolean = false;
@@ -88,6 +103,7 @@ export struct EditorAreaImpl {
   onUndo?: () => void;
   onRedo?: () => void;
   onDuplicateLine?: () => void;
+  onDuplicateLineUp?: () => void;
   onDeleteLine?: () => void;
   onMoveLineUp?: () => void;
   onMoveLineDown?: () => void;
@@ -161,6 +177,7 @@ export struct EditorAreaImpl {
   private foldRegions: FoldRegion[] = [];
   private textAreaController: TextAreaController = new TextAreaController();
   @State showMinimap: boolean = true;
+  private minimapDataSource: MinimapDataSource = new MinimapDataSource();
   private minimapScroller: Scroller = new Scroller();
   private minimapScrollRatio: number = 0;
   @State private minimapHeight: number = 0;
@@ -224,6 +241,7 @@ export struct EditorAreaImpl {
       if (len > maxLen) maxLen = len;
     }
     this.maxLineLen = maxLen;
+    this.minimapDataSource.setLines(lines);
   }
 
   private minimapLineWidth(line: string): number {
@@ -246,16 +264,6 @@ export struct EditorAreaImpl {
     return Math.min(indent * scale, mw * 0.4);
   }
 
-  private static readonly MINIMAP_KW: Set<string> = new Set([
-    'int', 'void', 'class', 'struct', 'if', 'else', 'for', 'while',
-    'return', 'const', 'static', 'def', 'function', 'import', 'from',
-    'public', 'private', 'protected', 'try', 'catch', 'throw',
-    'new', 'this', 'super', 'enum', 'switch', 'case', 'break',
-    'continue', 'do', 'goto', 'using', 'namespace', 'template',
-    'let', 'var', 'async', 'await', 'export', 'default', 'extends',
-    'implements', 'interface', 'type', 'readonly', 'abstract'
-  ]);
-
   private minimapLineColor(lineIdx: number): string {
     if (lineIdx === this.currentLineNum) {
       return this.col().accent;
@@ -276,7 +284,7 @@ export struct EditorAreaImpl {
     const kw = this.getLeadingWs(line).length < line.length
       ? line.trimStart().split(/[\s(]/)[0] : '';
     if (kw.length > 0) {
-      if (EditorAreaImpl.MINIMAP_KW.has(kw)) {
+      if (MINIMAP_KW.has(kw)) {
         return this.currentColorMode === 'light' ? '#0033B3' : '#CC7832';
       }
     }
@@ -311,37 +319,12 @@ export struct EditorAreaImpl {
   @State showCommandPalette: boolean = false;
   @State showSymbolPalette: boolean = false;
   private cmdFilter: string = '';
-  private static readonly COMMANDS: CommandItem[] = [
-    new CommandItem('保存文件', '保存当前文件', 'Ctrl+S'),
-    new CommandItem('撤销', '撤销上次编辑', 'Ctrl+Z'),
-    new CommandItem('重做', '重做已撤销的编辑', 'Ctrl+Y'),
-    new CommandItem('查找替换', '打开查找替换栏', 'Ctrl+F'),
-    new CommandItem('转到行', '跳转到指定行号', 'Ctrl+G'),
-    new CommandItem('全部折叠', '折叠所有代码块', ''),
-    new CommandItem('展开全部', '展开所有折叠', ''),
-    new CommandItem('切换行号', '显示/隐藏行号', ''),
-    new CommandItem('切换自动换行', '开启/关闭自动换行', ''),
-    new CommandItem('切换注释', '行注释切换', 'Ctrl+/'),
-    new CommandItem('复制当前行', '复制光标所在行', 'Ctrl+D'),
-    new CommandItem('删除当前行', '删除光标所在行', 'Ctrl+Shift+K'),
-    new CommandItem('上移当前行', '当前行向上移动', 'Ctrl+Shift+↑'),
-    new CommandItem('下移当前行', '当前行向下移动', 'Ctrl+Shift+↓'),
-    new CommandItem('放大字体', '增大编辑器字号', 'Ctrl+='),
-    new CommandItem('缩小字体', '减小编辑器字号', 'Ctrl+-'),
-    new CommandItem('重置缩放', '恢复默认字号', 'Ctrl+0'),
-    new CommandItem('插入日期时间', '插入当前日期时间', ''),
-    new CommandItem('快捷键参考', '显示所有快捷键', 'F1'),
-    new CommandItem('选中整行', '选中光标所在整行', 'Ctrl+L'),
-    new CommandItem('跳转匹配括号', '跳转到匹配的括号', 'Ctrl+['),
-    new CommandItem('复制行到下方', '向下插入空行', 'Ctrl+Enter'),
-    new CommandItem('复制行到上方', '向上插入空行', 'Ctrl+Shift+Enter'),
-  ];
   private getCommandPaletteItems(): CommandItem[] {
     const f = this.cmdFilter.toLowerCase();
     if (f.length === 0) {
-      return EditorAreaImpl.COMMANDS;
+      return COMMANDS;
     }
-    return EditorAreaImpl.COMMANDS.filter((c): boolean =>
+    return COMMANDS.filter((c): boolean =>
       c.label.toLowerCase().includes(f) || c.desc.toLowerCase().includes(f)
     );
   }
@@ -419,42 +402,6 @@ export struct EditorAreaImpl {
     this.onFoldAllChange();
   }
 
-  // ===== 代码片段（参考 VS Code Snippets）=====
-  private static readonly SNIPPETS_CPP: Record<string, string> = {
-    'fori': 'for (int i = 0; i < n; i++) {\n\t\n}',
-    'fore': 'for (auto &x : v) {\n\t\n}',
-    'if': 'if (condition) {\n\t\n}',
-    'else': 'else {\n\t\n}',
-    'main': 'int main() {\n\treturn 0;\n}',
-    'class': 'class name {\npublic:\n\t\n};',
-    'struct': 'struct name {\n\t\n};',
-    'while': 'while (condition) {\n\t\n}',
-    'switch': 'switch (x) {\ncase 1:\n\tbreak;\ndefault:\n\tbreak;\n}',
-    'cout': 'std::cout <<  << std::endl;',
-    'vector': 'std::vector<type> v;',
-  };
-
-  private static readonly SNIPPETS_PYTHON: Record<string, string> = {
-    'def': 'def name():\n\t\n',
-    'for': 'for x in iterable:\n\t\n',
-    'if': 'if condition:\n\t\n',
-    'class': 'class name:\n\t\n',
-    'while': 'while condition:\n\t\n',
-    'try': 'try:\n\t\nexcept:\n\t\n',
-    'with': 'with open("file", "r") as f:\n\t\n',
-  };
-
-  private static readonly SNIPPETS_ARKTS: Record<string, string> = {
-    'func': 'function name() {\n\t\n}',
-    'for': 'for (let i = 0; i < n; i++) {\n\t\n}',
-    'forof': 'for (const item of list) {\n\t\n}',
-    'if': 'if (condition) {\n\t\n}',
-    'else': 'else {\n\t\n}',
-    'class': '@Observed\nclass name {\n\t\n}',
-    'struct': '@Component\nstruct name {\n\tbuild() {\n\t}\n}',
-    'switch': 'switch (x) {\n\tcase 1:\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n}',
-  };
-
   /**
    * Tab 键触发代码片段展开。
    * 读取光标前的单词，匹配到片段则替换。
@@ -475,11 +422,11 @@ export struct EditorAreaImpl {
     // 按语言选择片段表
     let snippets: Record<string, string> | undefined;
     if (this.language === 'cpp' || this.language === 'c') {
-      snippets = EditorAreaImpl.SNIPPETS_CPP;
+      snippets = SNIPPETS_CPP;
     } else if (this.language === 'python') {
-      snippets = EditorAreaImpl.SNIPPETS_PYTHON;
+      snippets = SNIPPETS_PYTHON;
     } else if (this.language === 'arkts' || this.language === 'typescript' || this.language === 'javascript') {
-      snippets = EditorAreaImpl.SNIPPETS_ARKTS;
+      snippets = SNIPPETS_ARKTS;
     }
     if (!snippets) return false;
     const expansion = snippets[word];
@@ -572,10 +519,6 @@ export struct EditorAreaImpl {
   private lastLang: string = 'plaintext';
   private bracketChars: string = '{}[]()<>';
   private bracketLevels: Map<number, number> = new Map();
-  // 括号颜色调色板（6 色循环）
-  private static readonly BRACKET_COLORS: string[] = [
-    '#FFD700', '#DA70D6', '#00CED1', '#FF6B6B', '#87CEEB', '#FFA500'
-  ];
   private bookmarkedLines: Set<number> = new Set();
   private cachedLines: string[] = [];
   private linesDirty: boolean = true;
@@ -697,12 +640,9 @@ export struct EditorAreaImpl {
     AppStorage.setOrCreate('indentType', this.useTabs ? ('Tab:' + this.indentSize) : ('空格:' + this.indentSize));
   }
 
-  // ===== 单词导航 =====
-  private static readonly WORD_SEP = new Set('`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?'.split(''));
-
   private wordClassOf(ch: string): number {
     if (ch === ' ' || ch === '\t') { return 1; }
-    if (EditorAreaImpl.WORD_SEP.has(ch)) { return 2; }
+    if (WORD_SEP_CHARS.has(ch)) { return 2; }
     return 0;
   }
 
@@ -1387,6 +1327,8 @@ export struct EditorAreaImpl {
       return;
     }
     this.textChanging = true;
+    const wasPaste = this.pendingPasteIndent;
+    this.pendingPasteIndent = false;
     try {
       let cleanValue = this.replaceCrlf(value);
       if (cleanValue === this.lastHandledText) {
@@ -1394,6 +1336,7 @@ export struct EditorAreaImpl {
       }
       const oldText = this.lastHandledText;
       if (cleanValue === oldText) {
+        this.pendingPasteIndent = false;
         return;
       }
       this.autoIndentCaret = -1;
@@ -1438,8 +1381,7 @@ export struct EditorAreaImpl {
         this.updateBracketMatching(cleanValue, changedPos);
         this.updateWordHighlight();
 
-        if (this.pendingPasteIndent) {
-          this.pendingPasteIndent = false;
+        if (wasPaste) {
           const indentResult = this.tryAutoIndentPaste(cleanValue, changedPos);
           if (indentResult !== cleanValue) {
             cleanValue = indentResult;
@@ -1637,6 +1579,7 @@ export struct EditorAreaImpl {
     }
     this.fullText = r.join('\n');
     this.editorText = newVisible;
+    this.invalidateLines();
   }
 
   // ---------- detect / tokens / render / lines ----------
@@ -1775,7 +1718,7 @@ export struct EditorAreaImpl {
       if (tok.text.length === 0) { pos += tok.text.length; continue; }
       let skip = false;
       for (const rr of cr) {
-        if (pos >= rr[0] && pos + tok.text.length <= rr[1] + 1) {
+        if (pos >= rr[0] && pos + tok.text.length <= rr[1]) {
           skip = true;
           break;
         }
@@ -2005,10 +1948,12 @@ export struct EditorAreaImpl {
   onFoldAllChange(): void {
     this.findAllFoldRegions();
     if (this.foldAll) {
+      let totalHidden = 0;
       for (const r of this.foldRegions) {
         r.collapsed = true;
+        totalHidden += r.endLine - r.startLine - 1;
       }
-      this.activeFoldCount = this.foldRegions.length;
+      this.activeFoldCount = totalHidden;
     } else {
       for (const r of this.foldRegions) {
         r.collapsed = false;
@@ -2230,8 +2175,8 @@ export struct EditorAreaImpl {
     // 括号层级配色优先
     const level = this.bracketLevels.get(startIndex);
     if (level !== undefined && level > 0) {
-      const idx = (level - 1) % EditorAreaImpl.BRACKET_COLORS.length;
-      return EditorAreaImpl.BRACKET_COLORS[idx];
+      const idx = (level - 1) % BRACKET_COLORS.length;
+      return BRACKET_COLORS[idx];
     }
     const isLight = this.currentColorMode === 'light';
     switch (tokenType) {
@@ -2250,11 +2195,12 @@ export struct EditorAreaImpl {
    * 若命中则返回下划线装饰，否则返回 None。
    */
   matchDecoration(si: number): TextDecorationType {
-    if (this.searchMatches.length === 0 || this.searchLen <= 0) {
+    if (this.searchMatches.length === 0) {
       return TextDecorationType.None;
     }
     for (let i = 0; i < this.searchMatches.length; i++) {
-      if (si >= this.searchMatches[i] && si < this.searchMatches[i] + this.searchLen) {
+      const mLen = this.matchLengths.length > i ? this.matchLengths[i] : this.searchLen;
+      if (mLen > 0 && si >= this.searchMatches[i] && si < this.searchMatches[i] + mLen) {
         return TextDecorationType.Underline;
       }
     }
@@ -2269,7 +2215,8 @@ export struct EditorAreaImpl {
       return false;
     }
     const ms = this.searchMatches[this.currentSearchIdx];
-    return si >= ms && si < ms + this.searchLen;
+    const mLen = this.matchLengths.length > this.currentSearchIdx ? this.matchLengths[this.currentSearchIdx] : this.searchLen;
+    return si >= ms && si < ms + mLen;
   }
 
   /**
@@ -2518,7 +2465,11 @@ export struct EditorAreaImpl {
         return true;
       }
       if (kc === 2037) {
-        shift ? this.transformWord('upper') : this.transformWord('lower');
+        if (shift) {
+          this.transformWord('upper');
+        } else {
+          this.transformWord('lower');
+        }
         return true;
       }
       if (event.keyText === '\n') {
@@ -2561,7 +2512,7 @@ export struct EditorAreaImpl {
       return true;
     }
     if (alt) {
-      if (shift && kc === 2054) { if (this.onDuplicateLine) this.onDuplicateLine(); return true; }
+      if (shift && kc === 2054) { if (this.onDuplicateLineUp) this.onDuplicateLineUp(); return true; }
       if (shift && kc === 2055) { if (this.onDuplicateLine) this.onDuplicateLine(); return true; }
       if (kc === 2054) { if (this.onMoveLineUp) this.onMoveLineUp(); return true; }
       if (kc === 2055) { if (this.onMoveLineDown) this.onMoveLineDown(); return true; }
@@ -2571,8 +2522,8 @@ export struct EditorAreaImpl {
   }
 
   private handleKeyEvent(event: KeyEvent): boolean {
-    const kc = event.keyCode; const kt = event.keyText;
-    if (kc === 2049 || kc === 9) {
+    const kc = event.keyCode;
+    if (kc === 9) {
       if (event.type !== KeyType.Down) return true;
       let shift = false;
       if (event.getModifierKeyState !== undefined) {
@@ -2684,7 +2635,7 @@ export struct EditorAreaImpl {
       Stack({ alignContent: Alignment.TopStart }) {
         Scroll(this.minimapScroller) {
           Column() {
-            ForEach(this.getLines(), (line: string, idx: number) => {
+            LazyForEach(this.minimapDataSource, (line: string, idx: number) => {
               Row()
                 .width(Math.min(EditorAreaImpl.MINIMAP_WIDTH - 4, Math.max(2, this.minimapLineWidth(line))))
                 .height(EditorAreaImpl.MINIMAP_LINE_H)
@@ -2738,49 +2689,14 @@ export struct EditorAreaImpl {
     }.width('100%').height('100%')
 
     if (this.showShortcutsPanel) {
-      Column() {
-        Column() {
-          Text('⌨ 快捷键参考').fontSize(this.fontSize * 1.5).fontWeight(FontWeight.Bold).fontColor(this.col().text).margin({ bottom: 20 })
-
-          Row() { Text('编辑').fontSize(this.fontSize * 0.75).fontColor(this.col().textSecondary).width(60); Text('Ctrl+S').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('保存').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+Z / Ctrl+Y').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('撤销 / 重做').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+D').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('复制当前行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+Shift+K').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('删除当前行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+Shift+[/]').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('折叠/展开块').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+/').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('切换注释').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Tab / Shift+Tab').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('缩进 / 反缩进').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Alt+↑ / Alt+↓').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('上/下移动行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Alt+Shift+↑/↓').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('复制行到上/下').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+Enter / Shift').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('下/上插入空行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+U / Ctrl+Shift+U').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('单词小写 / 大写').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('导航').fontSize(this.fontSize * 0.75).fontColor(this.col().textSecondary).width(60); Text('Ctrl+F / Ctrl+H').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('查找 / 替换').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+G').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('跳转到行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+E').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('跳转到匹配括号').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+L').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('跳到行首').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('F2').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('跳转下一个书签').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+F2').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('切换书签').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('窗口').fontSize(this.fontSize * 0.75).fontColor(this.col().textSecondary).width(60); Text('F1').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('快捷键参考').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-
-          Row() { Text('').fontSize(this.fontSize * 0.75).width(60); Text('Ctrl+Shift+↑/↓').fontSize(this.fontSize * 0.85).fontFamily('monospace').fontColor(this.col().accentBg).width(150); Text('上/下移动行').fontSize(this.fontSize * 0.85).fontColor(this.col().text).layoutWeight(1) }.padding({ top: 6, bottom: 6 }).width('100%')
-        }.padding(32).borderRadius(16).backgroundColor(this.col().bg).shadow({ radius: 32, color: 'rgba(0,0,0,0.3)', offsetX: 0, offsetY: 8 }).width('90%').constraintSize({ maxWidth: 560 })
-      }.width('100%').height('100%').backgroundColor('rgba(0,0,0,0.4)').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center).onClick(() => { this.showShortcutsPanel = false; })
+      ShortcutsPanel({
+        fontSize: this.fontSize,
+        bgColor: this.col().bg,
+        textColor: this.col().text,
+        mutedColor: this.col().textSecondary,
+        accentColor: this.col().accentBg,
+        onClose: () => { this.showShortcutsPanel = false; }
+      })
     }
     if (this.showCommandPalette) {
       Column() {

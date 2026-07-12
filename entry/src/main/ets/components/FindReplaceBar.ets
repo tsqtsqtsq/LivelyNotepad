@@ -1,4 +1,5 @@
 import { ThemeColors } from '../utils/ThemeColors';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /**
  * 查找替换栏组件
@@ -30,8 +31,8 @@ export struct FindReplaceBarImpl {
   onClose: () => void = () => {};
   onReplace: (newText: string) => void = (_newText: string) => {};
   onFindJump: (pos: number, len: number) => void = (_pos: number, _len: number) => {};
-  onSearchUpdate: (matches: number[], currentIdx: number, len: number) => void =
-    (_matches: number[], _currentIdx: number, _len: number) => {};
+  onSearchUpdate: (matches: number[], currentIdx: number, len: number, matchLengths: number[]) => void =
+    (_matches: number[], _currentIdx: number, _len: number, _matchLengths: number[]) => {};
 
   // 内部状态
   private matchPositions: number[] = [];
@@ -99,7 +100,7 @@ doSearch(): void {
     this.currentMatch = 0;
     if (!st || et.length === 0) {
       this.matchCount = 0;
-      this.onSearchUpdate([], -1, 0);
+      this.onSearchUpdate([], -1, 0, []);
       return;
     }
     // 正则搜索
@@ -115,9 +116,10 @@ doSearch(): void {
             re.lastIndex++;
           }
         }
-      } catch (_) {
+      } catch (err) {
+        hilog.warn(0x0000, 'FindReplaceBar', 'Invalid regex: %{public}s', st);
         this.matchCount = 0;
-        this.onSearchUpdate([], -1, 0);
+        this.onSearchUpdate([], -1, 0, []);
         return;
       }
     } else {
@@ -145,9 +147,9 @@ doSearch(): void {
       this.currentMatch = 1;
       const len = this.matchLengths[0];
       this.onFindJump(this.matchPositions[0], len);
-      this.onSearchUpdate(this.matchPositions, 0, len);
+      this.onSearchUpdate(this.matchPositions, 0, len, this.matchLengths);
     } else {
-      this.onSearchUpdate([], -1, 0);
+      this.onSearchUpdate([], -1, 0, []);
     }
   }, 0);
 }
@@ -166,7 +168,7 @@ private findPrev(): void {
   const idx = this.currentMatch - 1;
   const len = this.matchLengths.length > idx ? this.matchLengths[idx] : 0;
   this.onFindJump(this.matchPositions[idx], len);
-  this.onSearchUpdate(this.matchPositions, idx, len);
+  this.onSearchUpdate(this.matchPositions, idx, len, this.matchLengths);
   if (wasFirst) {
     this.showWrap('已循环，从最后一个开始');
   }
@@ -182,7 +184,7 @@ private findNext(): void {
   const idx = this.currentMatch - 1;
   const len = this.matchLengths.length > idx ? this.matchLengths[idx] : 0;
   this.onFindJump(this.matchPositions[idx], len);
-  this.onSearchUpdate(this.matchPositions, idx, len);
+  this.onSearchUpdate(this.matchPositions, idx, len, this.matchLengths);
   if (wasLast) {
     this.showWrap('已循环，从第一个开始');
   }
@@ -238,6 +240,11 @@ private replaceAll(): void {
 // ================================================================
 // UI 构建
 // ================================================================
+
+aboutToDisappear(): void {
+    clearTimeout(this.searchTimer);
+    clearTimeout(this.doSearchTimer);
+  }
 
 build() {
   Column() {

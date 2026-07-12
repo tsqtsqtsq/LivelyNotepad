@@ -245,6 +245,7 @@ export function getLanguageFromExtension(fileName: string): ProgrammingLanguage 
 export class TabStateManager {
   /** 所有打开的标签页列表 */
   tabs: TabModel[];
+  tabsVersion: number = 0;
   /** 当前活动标签页的ID */
   activeTabId: string;
   /** 标签页ID计数器 */
@@ -259,9 +260,9 @@ export class TabStateManager {
   private readonly maxHistory: number = 50;
   private tabMap: Map<string, TabModel>;
 
-  /** 触发 tabs 数组的响应式更新（@Observed 不追踪数组内部变异） */
+  /** 触发 tabs 数组的响应式更新（O(1) 版本号替代 O(n) 数组复制） */
   private triggerTabsChange(): void {
-    this.tabs = [...this.tabs];
+    this.tabsVersion++;
   }
 
   constructor() {

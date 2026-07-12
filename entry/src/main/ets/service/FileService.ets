@@ -1,61 +1,56 @@
 import { fileIo } from '@kit.CoreFileKit';
-import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
 import { LineEndingType } from '../model/TabModel';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /**
- * 文件读写服务 - 封装 HarmonyOS 文件系统 API
+ * 文件读写服务 - 封装 HarmonyOS 文件系统 API（异步 I/O）
  * 负责文件的打开、保存、另存为等操作
  */
 export class FileService {
-  static readFile(filePath: string, encoding: string = 'utf-8'): Promise<string> {
-    return new Promise<string>((resolve: (value: string) => void, reject: (reason: Error) => void) => {
-      let file: fileIo.File | undefined;
-      try {
-        file = fileIo.openSync(filePath, fileIo.OpenMode.READ_ONLY);
-        const stat = fileIo.statSync(filePath);
-        if (stat.size === 0) {
-          resolve('');
-          return;
-        }
-        const buffer = new ArrayBuffer(stat.size);
-        const readLen = fileIo.readSync(file.fd, buffer);
-        const decoder = new util.TextDecoder(encoding);
-        const content: string = decoder.decodeWithStream(new Uint8Array(buffer, 0, readLen));
-        resolve(content);
-      } catch (err) {
-        const e = err instanceof Error ? err as Error : new Error(String(err));
-        reject(new Error('读取文件失败: ' + e.message));
-      } finally {
-        if (file) {
-          try { fileIo.closeSync(file); } catch (e) { /* silent */ }
+  static async readFile(filePath: string, encoding: string = 'utf-8'): Promise<string> {
+    let file: fileIo.File | undefined;
+    try {
+      file = await fileIo.open(filePath, fileIo.OpenMode.READ_ONLY);
+      const stat = await fileIo.stat(filePath);
+      if (stat.size === 0) {
+        return '';
+      }
+      const buffer = new ArrayBuffer(stat.size);
+      const readLen = await fileIo.read(file.fd, buffer);
+      const decoder = new util.TextDecoder(encoding);
+      const content: string = decoder.decodeToString(new Uint8Array(buffer, 0, readLen));
+      return content;
+    } catch (err) {
+      const msg = err instanceof Error ? (err as Error).message : String(err);
+      throw new Error('读取文件失败: ' + msg);
+    } finally {
+      if (file) {
+        try { await fileIo.close(file); } catch (e) {
+          hilog.warn(0x0000, 'FileService', 'Failed to close read file: %{public}s', String(e));
         }
       }
-    });
+    }
   }
 
-  /**
-   * 写入文件内容
-   */
-  static writeFile(filePath: string, content: string): Promise<void> {
-    return new Promise<void>((resolve: () => void, reject: (reason: Error) => void) => {
-      let file: fileIo.File | undefined;
-      try {
-        file = fileIo.openSync(filePath,
-          fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-        const encoder = new util.TextEncoder();
-        const buffer: Uint8Array = encoder.encodeInto(content);
-        fileIo.writeSync(file.fd, buffer);
-        resolve();
-      } catch (err) {
-        const msg = err instanceof Error ? (err as Error).message : String(err);
-        reject(new Error('保存文件失败: ' + msg));
-      } finally {
-        if (file) {
-          try { fileIo.closeSync(file); } catch (e) { /* 静默 */ }
+  static async writeFile(filePath: string, content: string): Promise<void> {
+    let file: fileIo.File | undefined;
+    try {
+      file = await fileIo.open(filePath,
+        fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      const encoder = new util.TextEncoder();
+      const buffer: Uint8Array = encoder.encodeInto(content);
+      await fileIo.write(file.fd, buffer);
+    } catch (err) {
+      const msg = err instanceof Error ? (err as Error).message : String(err);
+      throw new Error('保存文件失败: ' + msg);
+    } finally {
+      if (file) {
+        try { await fileIo.close(file); } catch (e) {
+          hilog.warn(0x0000, 'FileService', 'Failed to close write file: %{public}s', String(e));
         }
       }
-    });
+    }
   }
 
   static getFileName(fullPath: string): string {
@@ -76,9 +71,6 @@ export class FileService {
     return '';
   }
 
-  /**
-   * 检测文本中的换行符类型
-   */
   static detectLineEnding(content: string): LineEndingType {
     if (!content || content.length === 0) {
       return LineEndingType.LF;

@@ -1,4 +1,5 @@
 import { TabModel, TabStateManager, ProgrammingLanguage } from '../model/TabModel';
+import { SessionTabRecord, SessionRecord } from '../model/SessionModel';
 import { FileService } from '../service/FileService';
 import { ThemeColors } from '../utils/ThemeColors';
 import { EditorTabBarImpl as EditorTabBar, TabItem } from '../components/EditorTabBar';
@@ -12,23 +13,7 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { TipsDialog } from '@kit.ArkUI';
 import { window } from '@kit.ArkUI';
 import { preferences } from '@kit.ArkData';
-
-interface SessionTabRecord {
-  id: string;
-  label: string;
-  filePath: string;
-  content: string;
-  language: string;
-  isModified: boolean;
-  encoding: string;
-  cursorLine: number;
-  cursorColumn: number;
-}
-
-interface SessionRecord {
-  activeTabId: string;
-  tabs: SessionTabRecord[];
-}
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /**
  * 灵动编辑器 - 主页面
@@ -48,6 +33,7 @@ struct Index {
   @State searchMatches: number[] = [];
   @State currentSearchIdx: number = -1;
   @State searchLen: number = 0;
+  @State matchLengths: number[] = [];
   @State foldAll: boolean = false;
   // 字体大小
   @StorageProp('fontSize') fontSize: number = 16;
@@ -104,7 +90,9 @@ struct Index {
       if (data && typeof data === 'string' && data.length > 0) {
         this.recentFiles = data.split('|');
       }
-    } catch (_) {}
+    } catch (err) {
+      hilog.warn(0x0000, 'Index', 'Failed to init recent files: %{public}s', String(err));
+    }
   }
 
   private addRecentFile(uri: string): void {
@@ -124,7 +112,9 @@ struct Index {
       try {
         this.recentPrefs.putSync('uris', this.recentFiles.join('|'));
         this.recentPrefs.flush();
-      } catch (_) {}
+      } catch (err) {
+        hilog.warn(0x0000, 'Index', 'Failed to persist recent files: %{public}s', String(err));
+      }
     }
   }
 
@@ -161,7 +151,8 @@ struct Index {
         w.setWindowTitle('LivelyNotepad');
         this.applySystemBars(w, dark);
       });
-    } catch (_) {
+    } catch (err) {
+      hilog.warn(0x0000, 'Index', 'Failed to detect color mode in aboutToAppear: %{public}s', String(err));
       AppStorage.setOrCreate('currentColorMode', 'light');
     }
     this.restoreSession();
@@ -178,7 +169,9 @@ struct Index {
         isStatusBarLightIcon: iconLight,
         isNavigationBarLightIcon: iconLight
       });
-    } catch (_) {}
+    } catch (err) {
+      hilog.warn(0x0000, 'Index', 'Failed to set system bar properties: %{public}s', String(err));
+    }
   }
 
   private applySystemColorMode(): void {
@@ -187,11 +180,13 @@ struct Index {
       const dark = ctx.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
       AppStorage.setOrCreate('currentColorMode', dark ? 'dark' : 'light');
     } catch (e) {
+      hilog.warn(0x0000, 'Index', 'Failed to apply system color mode: %{public}s', String(e));
       AppStorage.setOrCreate('currentColorMode', 'light');
     }
   }
 
   aboutToDisappear(): void {
+    clearTimeout(this.autoSaveTimer);
     this.aboutDialogController = undefined;
     this.donateWechatController = undefined;
     this.donateAlipayController = undefined;
@@ -214,18 +209,20 @@ struct Index {
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       return ctx.filesDir + '/session_backup.json';
-    } catch (_) {
+    } catch (err) {
+      hilog.warn(0x0000, 'Index', 'Failed to get session path: %{public}s', String(err));
       return '/data/session_backup.json';
     }
   }
 
-  private saveSession(): void {
+  private async saveSession(): Promise<void> {
     try {
       const tabs = this.tabManager.getAllTabs();
       const path = this.getSessionPath();
       if (tabs.length === 0) {
-        // 无标签时删除会话文件，下次启动显示欢迎页
-        try { fileIo.unlinkSync(path); } catch (e) { /* 文件本就不存在 */ }
+        try { await fileIo.unlink(path); } catch (e) {
+          hilog.warn(0x0000, 'Index', 'Failed to unlink session file: %{public}s', String(e));
+        }
         return;
       }
       const tabRecords: SessionTabRecord[] = [];
@@ -250,19 +247,23 @@ struct Index {
       }
       let file: fileIo.File | undefined;
       try {
-        file = fileIo.openSync(
+        file = await fileIo.open(
           path,
           fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC
         );
-        fileIo.writeSync(file.fd, json);
-        fileIo.fsyncSync(file.fd);
+        const encoder = new util.TextEncoder();
+        const buf = encoder.encodeInto(json);
+        await fileIo.write(file.fd, buf);
+        await fileIo.fsync(file.fd);
       } finally {
         if (file) {
-          try { fileIo.closeSync(file); } catch (e) { /* 静默 */ }
+          try { await fileIo.close(file); } catch (e) {
+            hilog.warn(0x0000, 'Index', 'Failed to close session save file: %{public}s', String(e));
+          }
         }
       }
     } catch (e) {
-      // 静默失败
+      hilog.warn(0x0000, 'Index', 'Failed to save session: %{public}s', String(e));
     }
   }
 
@@ -300,10 +301,10 @@ struct Index {
         }
       }
     } catch (e) {
-      // 首次启动无缓存文件
+      hilog.warn(0x0000, 'Index', 'Failed to restore session (first launch?): %{public}s', String(e));
     } finally {
       if (file) {
-        try { fileIo.closeSync(file); } catch (e) { /* 静默 */ }
+        try { fileIo.closeSync(file); } catch (e) { hilog.warn(0x0000, 'Index', 'Failed to close session restore file: %{public}s', String(e)); }
       }
     }
   }
@@ -333,6 +334,7 @@ struct Index {
    * 转换为TabItem列表供EditorTabBar使用
    */
   private getTabItems(): TabItem[] {
+    const _ = this.tabManager.tabsVersion;
     const items: TabItem[] = [];
     const tabs = this.tabManager.getAllTabs();
     for (let i = 0; i < tabs.length; i++) {
@@ -374,11 +376,13 @@ struct Index {
             this.addRecentFile(uri);
             this.updateStatusBar();
           }).catch((err: Error): void => {
+            hilog.error(0x0000, 'Index', 'Failed to read file: %{public}s', err.message);
           });
         }
       }).catch((err: Error): void => {
       });
     } catch (err) {
+      hilog.error(0x0000, 'Index', 'Failed to open file: %{public}s', String(err));
     }
   }
 
@@ -413,6 +417,7 @@ struct Index {
         this.tabManager.saveTab(tab.id);
         this.updateStatusBar();
       }).catch((err: Error): void => {
+        hilog.error(0x0000, 'Index', 'Failed to save file: %{public}s', err.message);
       });
     } else {
       this.onSaveAsFile();
@@ -437,13 +442,16 @@ struct Index {
               tab.label = FileService.getFileName(uri);
               this.tabManager.saveTab(tab.id);
               this.updateStatusBar();
-            }).catch((err: Error): void => {
-            });
+      }).catch((err: Error): void => {
+        hilog.error(0x0000, 'Index', 'Failed to write file in save as: %{public}s', err.message);
+      });
           }
         }
       }).catch((err: Error): void => {
+        hilog.error(0x0000, 'Index', 'Failed to save document: %{public}s', err.message);
       });
     } catch (err) {
+      hilog.error(0x0000, 'Index', 'Failed in onSaveAsFile: %{public}s', String(err));
     }
   }
 
@@ -521,6 +529,15 @@ struct Index {
     }
   }
 
+  private applyContentChange(newContent: string): void {
+    const tab = this.getActiveTab();
+    if (tab) {
+      this.tabManager.pushUndo(tab.id, tab.content);
+      this.tabManager.updateTabContent(tab.id, newContent);
+      this.saveSession();
+    }
+  }
+
   /** 插入当前日期时间 */
   private insertDateTime(): void {
     const tab = this.getActiveTab();
@@ -531,10 +548,17 @@ struct Index {
         String(now.getDate()).padStart(2, '0') + ' ' +
         String(now.getHours()).padStart(2, '0') + ':' +
         String(now.getMinutes()).padStart(2, '0');
-      const newContent = tab.content + ds;
-      this.tabManager.pushUndo(tab.id, tab.content);
-      this.tabManager.updateTabContent(tab.id, newContent);
-      this.saveSession();
+      const lines = tab.content.split('\n');
+      let offset = 0;
+      const lineIdx = tab.cursorLine >= 0 ? Math.min(tab.cursorLine, lines.length - 1) : 0;
+      for (let i = 0; i < lineIdx; i++) {
+        offset += lines[i].length + 1;
+      }
+      if (lineIdx < lines.length) {
+        offset += Math.min(tab.cursorColumn, lines[lineIdx].length);
+      }
+      const newContent = tab.content.substring(0, offset) + ds + tab.content.substring(offset);
+      this.applyContentChange(newContent);
     }
   }
 
@@ -557,9 +581,29 @@ struct Index {
       }
     }
     const newContent = newLines.join('\n');
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, newContent);
-    this.saveSession();
+    this.applyContentChange(newContent);
+  }
+
+  /** 向上复制当前行（Alt+Shift+↑） */
+  private duplicateLineUp(): void {
+    const tab = this.getActiveTab();
+    if (!tab || !tab.content) {
+      return;
+    }
+    const lineIdx = tab.cursorLine;
+    const lines = tab.content.split('\n');
+    if (lineIdx < 0 || lineIdx >= lines.length) {
+      return;
+    }
+    const newLines: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (i === lineIdx) {
+        newLines.push(lines[lineIdx]);
+      }
+      newLines.push(lines[i]);
+    }
+    const newContent = newLines.join('\n');
+    this.applyContentChange(newContent);
   }
 
   /** 删除当前行（参考 Notepad++ Ctrl+L） */
@@ -574,6 +618,7 @@ struct Index {
       return;
     }
     if (lines.length <= 1) {
+      this.tabManager.pushUndo(tab.id, tab.content);
       this.tabManager.updateTabContent(tab.id, '');
       this.saveSession();
       return;
@@ -585,9 +630,7 @@ struct Index {
       }
     }
     const newContent = newLines.join('\n');
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, newContent);
-    this.saveSession();
+    this.applyContentChange(newContent);
   }
 
   /** 选中/全文转大写 */
@@ -596,9 +639,7 @@ struct Index {
     if (!tab) {
       return;
     }
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, tab.content.toUpperCase());
-    this.saveSession();
+    this.applyContentChange(tab.content.toUpperCase());
   }
 
   /** 选中/全文转小写 */
@@ -607,9 +648,7 @@ struct Index {
     if (!tab) {
       return;
     }
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, tab.content.toLowerCase());
-    this.saveSession();
+    this.applyContentChange(tab.content.toLowerCase());
   }
 
   /** 移除行尾空格（参考 VS Code Trim Trailing Whitespace） */
@@ -630,9 +669,7 @@ struct Index {
     }
     const newContent = trimmed.join('\n');
     if (newContent !== tab.content) {
-      this.tabManager.pushUndo(tab.id, tab.content);
-      this.tabManager.updateTabContent(tab.id, newContent);
-      this.saveSession();
+      this.applyContentChange(newContent);
     }
   }
 
@@ -662,9 +699,7 @@ struct Index {
     lines.sort();
     const newContent = lines.join('\n');
     if (newContent !== tab.content) {
-      this.tabManager.pushUndo(tab.id, tab.content);
-      this.tabManager.updateTabContent(tab.id, newContent);
-      this.saveSession();
+      this.applyContentChange(newContent);
     }
   }
 
@@ -683,9 +718,7 @@ struct Index {
     }
     const newContent = result.join('\n');
     if (newContent !== tab.content) {
-      this.tabManager.pushUndo(tab.id, tab.content);
-      this.tabManager.updateTabContent(tab.id, newContent);
-      this.saveSession();
+      this.applyContentChange(newContent);
     }
   }
 
@@ -722,9 +755,7 @@ struct Index {
     }
     const newContent = filtered.join('\n');
     if (newContent !== tab.content) {
-      this.tabManager.pushUndo(tab.id, tab.content);
-      this.tabManager.updateTabContent(tab.id, newContent);
-      this.saveSession();
+      this.applyContentChange(newContent);
     }
   }
 
@@ -743,10 +774,8 @@ struct Index {
     lines[idx] = lines[idx - 1];
     lines[idx - 1] = tmp;
     const newContent = lines.join('\n');
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, newContent);
     tab.cursorLine = idx - 1;
-    this.saveSession();
+    this.applyContentChange(newContent);
   }
 
   /** 下移当前行 */
@@ -764,10 +793,8 @@ struct Index {
     lines[idx] = lines[idx + 1];
     lines[idx + 1] = tmp;
     const newContent = lines.join('\n');
-    this.tabManager.pushUndo(tab.id, tab.content);
-    this.tabManager.updateTabContent(tab.id, newContent);
     tab.cursorLine = idx + 1;
-    this.saveSession();
+    this.applyContentChange(newContent);
   }
 
   // ==================== 标签栏操作 ====================
@@ -796,7 +823,9 @@ struct Index {
         if (result.index === 0) {
           this.doCloseTab(tabId);
         }
-      }).catch(() => {});
+      }).catch(() => {
+        hilog.warn(0x0000, 'Index', 'Dialog was dismissed');
+      });
     } else {
       this.doCloseTab(tabId);
     }
@@ -860,7 +889,13 @@ struct Index {
       // 自动保存（3 秒无操作后保存有路径的文件）
       if (tab.filePath) {
         clearTimeout(this.autoSaveTimer);
-        this.autoSaveTimer = setTimeout(() => { this.onSaveFile(); }, 3000);
+        const capturedTabId = tab.id;
+        this.autoSaveTimer = setTimeout(() => {
+          const autoTab = this.tabManager.getTabById(capturedTabId);
+          if (autoTab && autoTab.filePath) {
+            this.onSaveFile();
+          }
+        }, 3000);
       }
     }
   }
@@ -915,15 +950,15 @@ struct Index {
         idx++;
       }
     }
-    this.tabManager.pushUndo(tab.id, tab.content);
+    let newContent: string;
     if (cur === 'LF') {
-      this.tabManager.updateTabContent(tab.id, lines.join('\r\n'));
+      newContent = lines.join('\r\n');
     } else if (cur === 'CRLF') {
-      this.tabManager.updateTabContent(tab.id, lines.join('\r'));
+      newContent = lines.join('\r');
     } else {
-      this.tabManager.updateTabContent(tab.id, lines.join('\n'));
+      newContent = lines.join('\n');
     }
-    this.saveSession();
+    this.applyContentChange(newContent);
   }
 
   private setWindowTitle(title: string): void {
@@ -932,7 +967,9 @@ struct Index {
       if (w) {
         w.setWindowTitle(title);
       }
-    } catch (_) {}
+    } catch (err) {
+      hilog.warn(0x0000, 'Index', 'Failed to set window title: %{public}s', String(err));
+    }
   }
 
   /** 语言名称映射表（模块级常量，避免每次调用重建 20+ 条目） */
@@ -1008,6 +1045,7 @@ struct Index {
           onReplace: (newText: string): void => {
             const tab = this.getActiveTab();
             if (tab) {
+              this.tabManager.pushUndo(tab.id, tab.content);
               this.tabManager.updateTabContent(tab.id, newText);
               this.saveSession();
             }
@@ -1015,9 +1053,11 @@ struct Index {
           onFindJump: (pos: number, _len: number): void => {
             this.findPosition = pos;
           },
-          onSearchUpdate: (matches: number[], idx: number, len: number): void => {
+          onSearchUpdate: (matches: number[], idx: number, len: number, matchLengths: number[]): void => {
             this.searchMatches = [...matches];
             this.currentSearchIdx = idx;
+            this.searchLen = len;
+            this.matchLengths = [...matchLengths];
             this.searchLen = len;
           }
         })
@@ -1042,6 +1082,7 @@ struct Index {
           searchMatches: this.searchMatches,
           currentSearchIdx: this.currentSearchIdx,
           searchLen: this.searchLen,
+          matchLengths: this.matchLengths,
           isModified: this.getActiveTabModified(),
           readOnly: this.readOnly,
           onContentChange: (content: string): void => { this.onContentChange(content); },
@@ -1072,6 +1113,7 @@ struct Index {
           onUndo: (): void => { this.onUndo(); },
           onRedo: (): void => { this.onRedo(); },
           onDuplicateLine: (): void => { this.duplicateLine(); },
+          onDuplicateLineUp: (): void => { this.duplicateLineUp(); },
           onDeleteLine: (): void => { this.deleteLine(); },
           onMoveLineUp: (): void => { this.moveLineUp(); },
           onMoveLineDown: (): void => { this.moveLineDown(); }
@@ -1280,17 +1322,24 @@ struct Index {
   /** 全部保存 */
   private onSaveAll(): void {
     const unsaved = this.tabManager.getUnsavedTabs();
+    const writes: Promise<void>[] = [];
     unsaved.forEach((tab: TabModel): void => {
       if (tab.filePath) {
-        FileService.writeFile(tab.filePath, tab.content)
-          .then((): void => {
-            this.tabManager.saveTab(tab.id);
-          })
-          .catch((err: Error): void => {
-          });
+        writes.push(
+          FileService.writeFile(tab.filePath, tab.content)
+            .then((): void => {
+              this.tabManager.saveTab(tab.id);
+            })
+        );
       }
     });
-    this.updateStatusBar();
+    if (writes.length > 0) {
+      Promise.all(writes).then((): void => {
+        this.updateStatusBar();
+      }).catch((err: Error): void => {
+        hilog.error(0x0000, 'Index', 'Failed to save all: %{public}s', err.message);
+      });
+    }
   }
 
   @Builder
@@ -1378,8 +1427,9 @@ struct Index {
       this.activeId = tab.id;
       this.addRecentFile(uri);
       this.updateStatusBar();
-    }).catch((err: Error): void => {
-    });
+      }).catch((err: Error): void => {
+        hilog.error(0x0000, 'Index', 'Failed to open recent file: %{public}s', err.message);
+      });
   }
 
   /** 编辑菜单：撤销、重做、行操作、插入日期。 */

@@ -138,8 +138,8 @@ export struct EditorTabBarImpl {
         // 可滚动标签区域
         Scroll(this.scroller) {
           Row() {
-            ForEach(this.tabs, (tab: TabItem, index: number) => {
-              this.TabItemBuilder(tab, index)
+            ForEach(this.tabs, (tab: TabItem, _index: number) => {
+              this.TabItemBuilder(tab)
             }, (tab: TabItem) => tab.id)
 
             // 新标签按钮
@@ -177,7 +177,7 @@ export struct EditorTabBarImpl {
   // ========== 构建器：单个标签项 ==========
 
   @Builder
-  TabItemBuilder(tab: TabItem, index: number) {
+  TabItemBuilder(tab: TabItem) {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
         // 左侧内边距
@@ -229,6 +229,11 @@ export struct EditorTabBarImpl {
       .onClick((): void => {
         this.contextMenuTabId = tab.id;
         this.handleTabClick(tab.id);
+      })
+      .onTouch((event: TouchEvent): void => {
+        if (event.type === TouchType.Down) {
+          this.contextMenuTabId = tab.id;
+        }
       })
       .bindContextMenu(this.TabContextBuilder, ResponseType.LongPress, {
         placement: Placement.BottomLeft
