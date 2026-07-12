@@ -1046,21 +1046,17 @@ export struct EditorAreaImpl {
    *   - 上一行是 // 注释 → 保持缩进并补 //
    */
   private tryAutoIndent(oldText: string, newText: string): string {
-    if (newText.length !== oldText.length + 1) {
-      return newText;
-    }
-    // 找到变更位置（即刚输入的回车符位置）
     let i = 0;
     while (i < oldText.length &&
            oldText.charAt(i) === newText.charAt(i)) {
       i++;
     }
-    if (newText.charAt(i) !== '\n') {
+    if (i >= newText.length || newText.charAt(i) !== '\n') {
       return newText;
     }
-    // 修正：当光标位于原有 \n 上按回车时，前缀扫描会越过实际插入点
-    // 例如 oldText="...;\n}", newText="...;\n\n}"  → i 指到了 } 的位置
-    // 检测 newText[i-1..i] 是否形成双 \n，是则回退
+    if (i < oldText.length && oldText.charAt(i) === '\n') {
+      return newText;
+    }
     if (i > 0 && newText.charAt(i - 1) === '\n') {
       i = i - 1;
     }
@@ -1123,9 +1119,6 @@ export struct EditorAreaImpl {
    * 自动将 } 的缩进对齐到匹配的 { 的缩进级别。
    */
   private tryBraceIndent(oldText: string, newText: string): string {
-    if (newText.length !== oldText.length + 1) {
-      return newText;
-    }
     const d = this.diffRange(oldText, newText);
     if (d.inserted.length !== 1) {
       return newText;
@@ -1206,37 +1199,45 @@ export struct EditorAreaImpl {
    * 流程：CRLF 清理 → IME 去重 → 选区包裹 → 自动闭合 →
    *       智能退格 → 回车缩进 → } 对齐 → 光标更新 → 重绘。
    */
+  private textChanging: boolean = false;
+  private lastHandledText: string = '';
   handleTextChange(value: string): void {
-    if (this.readOnly) {
+    if (this.readOnly || this.textChanging) {
       return;
     }
+    this.textChanging = true;
     let cleanValue = this.replaceCrlf(value);
-    if (cleanValue === this.editorText) {
+    if (cleanValue === this.lastHandledText) {
+      this.textChanging = false;
+      return;
+    }
+    const oldText = this.lastHandledText;
+    if (cleanValue === oldText) {
+      this.textChanging = false;
       return;
     }
     this.autoIndentCaret = -1;
 
-    // 选中文本后打字 → 括号自动包裹
-    if (cleanValue.length < this.editorText.length) {
-      const wrapped = this.tryWrapSelection(this.editorText, cleanValue);
+    if (cleanValue.length < oldText.length) {
+      const wrapped = this.tryWrapSelection(oldText, cleanValue);
       if (wrapped !== null) {
         cleanValue = wrapped;
       }
     }
 
-    this.updateSelectionStats(this.editorText, cleanValue);
+    this.updateSelectionStats(oldText, cleanValue);
 
-    if (cleanValue.length > this.editorText.length) {
-      // 插入路径：重复括号修复 → 自动闭合 → 自动缩进 → } 对齐
+    if (cleanValue.length > oldText.length) {
       cleanValue = this.fixCloseDuplicates(cleanValue);
-      if (cleanValue === this.editorText) {
+      if (cleanValue === oldText) {
+        this.lastHandledText = cleanValue;
+        this.textChanging = false;
         return;
       }
-      cleanValue = this.tryAutoClose(this.editorText, cleanValue);
-      cleanValue = this.tryAutoIndent(this.editorText, cleanValue);
-      cleanValue = this.tryBraceIndent(this.editorText, cleanValue);
+      cleanValue = this.tryAutoClose(oldText, cleanValue);
+      cleanValue = this.tryAutoIndent(oldText, cleanValue);
+      cleanValue = this.tryBraceIndent(oldText, cleanValue);
 
-      // 计算光标位置
       const cursorExplicit = this.autoIndentCaret >= 0;
       let changedPos: number;
       if (cursorExplicit) {
@@ -1244,11 +1245,11 @@ export struct EditorAreaImpl {
         this.autoIndentCaret = -1;
       } else {
         changedPos = 0;
-        const ol = this.editorText.length;
+        const ol = oldText.length;
         while (changedPos < cleanValue.length &&
                changedPos < ol &&
                cleanValue.charAt(changedPos) ===
-               this.editorText.charAt(changedPos)) {
+               oldText.charAt(changedPos)) {
           changedPos++;
         }
       }
@@ -1312,9 +1313,8 @@ export struct EditorAreaImpl {
         this.onCursorMove(ln, col);
       }
     } else {
-      // 删除路径：选区包裹 → 智能退格 → 状态同步 → 光标 → 重绘
-      cleanValue = this.trySelectionWrap(this.editorText, cleanValue);
-      cleanValue = this.trySmartBackspace(this.editorText, cleanValue);
+      cleanValue = this.trySelectionWrap(oldText, cleanValue);
+      cleanValue = this.trySmartBackspace(oldText, cleanValue);
 
       const cursorExplicit = this.autoIndentCaret >= 0;
       let changedPos: number;
@@ -1324,9 +1324,9 @@ export struct EditorAreaImpl {
       } else {
         changedPos = 0;
         while (changedPos < cleanValue.length &&
-               changedPos < this.editorText.length &&
+               changedPos < oldText.length &&
                cleanValue.charAt(changedPos) ===
-               this.editorText.charAt(changedPos)) {
+               oldText.charAt(changedPos)) {
           changedPos++;
         }
       }
@@ -1356,6 +1356,8 @@ export struct EditorAreaImpl {
       this.buildRenderTokens();
       this.scrollToCurrentLine();
     }
+    this.lastHandledText = this.editorText;
+    this.textChanging = false;
   }
 
   private handleSelectionChange(selStart: number, selEnd: number): void {
@@ -1819,9 +1821,11 @@ export struct EditorAreaImpl {
     const cl = this.currentLineNum;
     const lh = this.lineH();
     const cy = cl * lh;
-    const vh = 600; // 近似视口高度
+    const vh = this.visibleLineCount * lh;
+    if (vh <= 0) {
+      return;
+    }
     if (cy > this.lastScrollY + vh - lh * 2) {
-      // 光标在视口下方 → 向下滚动
       const ns = Math.max(0, cy - vh + lh * 3);
       this.editorScroller.scrollTo({
         xOffset: 0, yOffset: ns,
@@ -1829,7 +1833,6 @@ export struct EditorAreaImpl {
       });
       this.lastScrollY = ns;
     } else if (cy < this.lastScrollY) {
-      // 光标在视口上方 → 向上滚动
       this.editorScroller.scrollTo({
         xOffset: 0, yOffset: cy,
         animation: { duration: 120, curve: Curve.Linear }
@@ -2127,6 +2130,7 @@ export struct EditorAreaImpl {
     this.fullText = clean;
     this.editorText = clean;
     this.displayText = clean;
+    this.lastHandledText = clean;
     this.invalidateLines();
     this.guessIndentation(clean);
     this.lastLang = this.language;
@@ -2152,11 +2156,15 @@ export struct EditorAreaImpl {
     this.fullText = clean;
     this.editorText = clean;
     this.displayText = clean;
+    this.lastHandledText = clean;
     this.invalidateLines();
     this.guessIndentation(clean);
     this.updateTokens();
     this.buildLineList();
     this.syncStats();
+    this.lastScrollY = 0;
+    this.minimapScrollRatio = 0;
+    this.editorScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
   }
 
   /**
@@ -2304,7 +2312,6 @@ export struct EditorAreaImpl {
       Row() {
         // VS Code: gutter and editor are top-aligned
         if (this.showLineNumbers) {
-          // 合并列：折叠图标 + 书签标记
           Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
             Row() {
               Text(this.foldIcon(ind))
@@ -2320,13 +2327,15 @@ export struct EditorAreaImpl {
             }
           }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4 }).justifyContent(FlexAlign.Start)
 
-          Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
-            Text((ind.lineNumber + 1).toString())
-              .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
-              .fontColor(ind.lineNumber === this.currentLineNum ? this.col().accent : this.col().textSecondary)
-              .fontWeight(ind.lineNumber === this.currentLineNum ? FontWeight.Bold : FontWeight.Normal)
-              .textAlign(TextAlign.End).width(40).focusable(false)
-          }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).padding({ right: 8 }).justifyContent(FlexAlign.Start)
+          if (!this.wordWrap) {
+            Column() { ForEach(this.foldIndicators, (ind: FoldLineIndicator, idx: number) => {
+              Text((ind.lineNumber + 1).toString())
+                .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
+                .fontColor(ind.lineNumber === this.currentLineNum ? this.col().accent : this.col().textSecondary)
+                .fontWeight(ind.lineNumber === this.currentLineNum ? FontWeight.Bold : FontWeight.Normal)
+                .textAlign(TextAlign.End).width(40).focusable(false)
+            }, (ind: FoldLineIndicator) => ind.lineNumber.toString()) }.padding({ top: 4, right: 8 }).border({ width: { right: 1 }, color: this.col().border }).justifyContent(FlexAlign.Start)
+          }
         }
 
         Column() {
@@ -2353,10 +2362,10 @@ export struct EditorAreaImpl {
                 .hitTestBehavior(HitTestMode.None).focusable(false)
             }
             // 输入层（上层透明，接收所有触摸和焦点）
-            TextArea({ text: this.editorText, controller: this.textAreaController })
+            TextArea({ text: $$this.editorText, controller: this.textAreaController })
               .fontSize(this.fontSize).fontFamily('monospace').lineHeight(this.lineH())
               .fontColor('rgba(0,0,0,0)').backgroundColor('rgba(0,0,0,0)')
-              .padding(4).width('100%')
+              .padding({ top: 4, right: 4, bottom: 4, left: 4 }).width('100%')
               .constraintSize({ minHeight: this.visibleLineCount * this.lineH() })
               .focusable(true).focusOnTouch(true).id(this.tabId + '_textarea')
               .onKeyPreIme((event: KeyEvent): boolean => { return this.handleKeyPreIme(event); })
@@ -2384,19 +2393,23 @@ export struct EditorAreaImpl {
     // Minimap
     if (this.showMinimap && this.editorText.length > 0) {
       Stack({ alignContent: Alignment.TopStart }) {
-        Column() {
-          ForEach(this.getLines(), (line: string, idx: number) => {
-            Row()
-              .width(Math.min(56, Math.max(4, line.length * 0.8)))
-              .height(1)
-              .backgroundColor(this.col().textSecondary)
-              .opacity(0.3)
-              .margin({ left: this.getLineIndent(line) * 0.5 })
-          }, (line: string, idx: number) => idx.toString())
+        Scroll(this.minimapScroller) {
+          Column() {
+            ForEach(this.getLines(), (line: string, idx: number) => {
+              Row()
+                .width(Math.min(56, Math.max(4, line.length * 0.8)))
+                .height(1)
+                .backgroundColor(this.col().textSecondary)
+                .opacity(0.3)
+                .margin({ left: this.getLineIndent(line) * 0.5 })
+            }, (line: string, idx: number) => idx.toString())
+          }
+          .width(60)
         }
-        .width(60)
+        .scrollBar(BarState.Off)
         .hitTestBehavior(HitTestMode.None)
         .focusable(false)
+        .align(Alignment.TopStart)
 
         Row()
           .width(60)
